@@ -1,0 +1,1081 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <meta name="theme-color" content="#185FA5">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="FormHub">
+  <title>FormHub — 部門表單管理系統</title>
+  <style>
+/* ── Reset & Base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --blue: #185FA5; --blue-light: #E6F1FB; --blue-dark: #0C447C;
+  --green: #3B6D11; --green-light: #EAF3DE;
+  --amber: #854F0B; --amber-light: #FAEEDA;
+  --red: #A32D2D; --red-light: #FCEBEB;
+  --gray: #5F5E5A; --gray-light: #F1EFE8; --gray-mid: #B4B2A9;
+  --purple: #534AB7; --purple-light: #EEEDFE;
+  --teal: #0F6E56; --teal-light: #E1F5EE;
+  --text: #2C2C2A; --text-2: #5F5E5A; --text-3: #888780;
+  --bg: #ffffff; --bg-2: #F8F7F4; --bg-3: #F1EFE8;
+  --border: rgba(44,44,42,0.12); --border-2: rgba(44,44,42,0.22);
+  --radius: 8px; --radius-lg: 12px; --radius-xl: 16px;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+  --font: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --blue: #85B7EB; --blue-light: #0C447C; --blue-dark: #B5D4F4;
+    --green: #97C459; --green-light: #27500A;
+    --amber: #EF9F27; --amber-light: #633806;
+    --red: #F09595; --red-light: #791F1F;
+    --gray: #B4B2A9; --gray-light: #444441; --gray-mid: #5F5E5A;
+    --purple: #AFA9EC; --purple-light: #3C3489;
+    --teal: #5DCAA5; --teal-light: #085041;
+    --text: #E8E6DF; --text-2: #B4B2A9; --text-3: #888780;
+    --bg: #1C1C1A; --bg-2: #242422; --bg-3: #2C2C2A;
+    --border: rgba(255,255,255,0.1); --border-2: rgba(255,255,255,0.2);
+  }
+}
+html { font-size: 16px; -webkit-text-size-adjust: 100%; }
+body { font-family: var(--font); color: var(--text); background: var(--bg-2); min-height: 100vh; }
+
+/* ── Layout ── */
+#app { display: flex; flex-direction: column; min-height: 100vh; }
+.topbar {
+  background: var(--bg); border-bottom: 0.5px solid var(--border);
+  padding: 0 16px; height: 56px; display: flex; align-items: center;
+  justify-content: space-between; position: sticky; top: 0; z-index: 100;
+}
+.topbar-logo { font-size: 17px; font-weight: 600; color: var(--blue); letter-spacing: -0.3px; }
+.topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+.sidebar {
+  width: 220px; background: var(--bg); border-right: 0.5px solid var(--border);
+  padding: 12px 0; position: fixed; top: 56px; left: 0; bottom: 0;
+  overflow-y: auto; z-index: 90; transition: transform 0.25s ease;
+}
+.sidebar.hidden { transform: translateX(-100%); }
+.sidebar-section { padding: 4px 12px 4px; }
+.sidebar-label { font-size: 11px; font-weight: 500; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.5px; padding: 8px 4px 4px; }
+.sidebar-item {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border-radius: var(--radius); cursor: pointer; font-size: 14px; color: var(--text-2);
+  transition: background 0.15s; text-decoration: none;
+}
+.sidebar-item:hover { background: var(--bg-3); }
+.sidebar-item.active { background: var(--blue-light); color: var(--blue); font-weight: 500; }
+.sidebar-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; opacity: 0.6; flex-shrink: 0; }
+
+.main {
+  margin-left: 220px; padding: 20px; flex: 1;
+  transition: margin-left 0.25s ease;
+}
+.main.full { margin-left: 0; }
+
+@media (max-width: 768px) {
+  .sidebar { transform: translateX(-100%); }
+  .sidebar.open { transform: translateX(0); box-shadow: 4px 0 16px rgba(0,0,0,0.15); }
+  .main { margin-left: 0; padding: 12px; }
+  .overlay { display: block; }
+}
+.overlay {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+  z-index: 80; opacity: 0; transition: opacity 0.25s;
+}
+.overlay.show { opacity: 1; }
+
+/* ── Cards & Panels ── */
+.card {
+  background: var(--bg); border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg); padding: 16px 20px; margin-bottom: 14px;
+}
+.card-title {
+  font-size: 13px; font-weight: 500; color: var(--text-2);
+  padding-bottom: 10px; margin-bottom: 14px;
+  border-bottom: 0.5px solid var(--border);
+}
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.stat-card { background: var(--bg-2); border-radius: var(--radius); padding: 12px 14px; }
+.stat-label { font-size: 12px; color: var(--text-3); margin-bottom: 4px; }
+.stat-value { font-size: 22px; font-weight: 600; color: var(--text); }
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 14px; border-radius: var(--radius); font-size: 13px; font-weight: 500;
+  border: 0.5px solid var(--border-2); background: var(--bg); color: var(--text);
+  cursor: pointer; transition: background 0.15s, transform 0.1s; white-space: nowrap;
+  font-family: var(--font);
+}
+.btn:hover { background: var(--bg-3); }
+.btn:active { transform: scale(0.98); }
+.btn-primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+.btn-primary:hover { background: var(--blue-dark); }
+.btn-danger { background: var(--red-light); color: var(--red); border-color: var(--red-light); }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-icon { padding: 7px; }
+
+/* ── Forms & Inputs ── */
+.form-grid { display: grid; grid-template-columns: 130px 1fr; gap: 10px 14px; align-items: start; }
+@media (max-width: 480px) { .form-grid { grid-template-columns: 1fr; } .form-grid .flabel { margin-bottom: -6px; } }
+.flabel { font-size: 13px; color: var(--text-2); padding-top: 8px; }
+.flabel.required::after { content: ' *'; color: var(--red); }
+input[type=text], input[type=email], input[type=number], input[type=date],
+input[type=tel], select, textarea {
+  width: 100%; padding: 8px 10px; font-size: 14px; font-family: var(--font);
+  border: 0.5px solid var(--border-2); border-radius: var(--radius);
+  background: var(--bg); color: var(--text);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(24,95,165,0.12);
+}
+textarea { resize: vertical; min-height: 72px; line-height: 1.5; }
+.input-hint { font-size: 12px; color: var(--text-3); margin-top: 4px; }
+
+/* ── Table ── */
+.table-wrap { overflow-x: auto; border-radius: var(--radius-lg); border: 0.5px solid var(--border); }
+table { width: 100%; border-collapse: collapse; background: var(--bg); }
+th {
+  text-align: left; padding: 9px 12px; font-size: 12px; font-weight: 500;
+  color: var(--text-3); background: var(--bg-2); border-bottom: 0.5px solid var(--border);
+  white-space: nowrap;
+}
+td { padding: 10px 12px; border-bottom: 0.5px solid var(--border); font-size: 13px; color: var(--text); }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--bg-2); cursor: pointer; }
+.td-mono { font-family: monospace; font-size: 12px; color: var(--blue); font-weight: 500; }
+
+/* ── Badges ── */
+.badge {
+  display: inline-block; padding: 2px 9px; border-radius: 99px;
+  font-size: 11px; font-weight: 500; white-space: nowrap;
+}
+.badge-draft    { background: var(--gray-light);   color: var(--gray); }
+.badge-pending  { background: var(--amber-light);  color: var(--amber); }
+.badge-approved { background: var(--green-light);  color: var(--green); }
+.badge-rejected { background: var(--red-light);    color: var(--red); }
+.badge-blue     { background: var(--blue-light);   color: var(--blue-dark); }
+.badge-purple   { background: var(--purple-light); color: var(--purple); }
+
+/* ── Toolbar ── */
+.toolbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 0; margin-bottom: 12px;
+}
+.toolbar-spacer { flex: 1; }
+.search-box { position: relative; }
+.search-box input { padding-left: 30px; width: 200px; }
+.search-icon { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); color: var(--text-3); font-size: 14px; }
+
+/* ── Sequence Badge ── */
+.seq-badge {
+  display: inline-block; padding: 4px 12px; background: var(--blue-light);
+  color: var(--blue); border-radius: var(--radius); font-weight: 600;
+  font-size: 14px; font-family: monospace; letter-spacing: 0.5px;
+}
+
+/* ── Subtable ── */
+.subtable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.subtable th { padding: 7px 8px; font-size: 12px; background: var(--bg-2); }
+.subtable td { padding: 6px 8px; border-bottom: 0.5px solid var(--border); }
+.subtable td input, .subtable td select { padding: 5px 7px; font-size: 12px; width: 100%; }
+.subtable tfoot td { background: var(--bg-2); font-weight: 600; padding: 8px; }
+.subtable .del-btn { width: 28px; padding: 4px; text-align: center; }
+
+/* ── Revision History ── */
+.rev-item { padding: 12px 0; border-bottom: 0.5px solid var(--border); }
+.rev-item:last-child { border-bottom: none; }
+.rev-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.rev-ver { font-size: 12px; font-weight: 500; padding: 2px 8px; background: var(--blue-light); color: var(--blue); border-radius: 99px; }
+.rev-who { font-size: 12px; color: var(--text-3); }
+.rev-changes { background: var(--bg-2); border-radius: var(--radius); padding: 8px 12px; }
+.rev-change { font-size: 12px; margin-bottom: 4px; }
+.rev-field { font-weight: 500; }
+.rev-old { color: var(--red); text-decoration: line-through; }
+.rev-new { color: var(--green); }
+.rev-reason { font-size: 12px; color: var(--text-3); margin-top: 6px; font-style: italic; }
+
+/* ── Approval Steps ── */
+.approval-steps { display: flex; flex-direction: column; gap: 0; }
+.approval-step { display: flex; align-items: flex-start; gap: 12px; padding: 12px 0; position: relative; }
+.approval-step:not(:last-child)::before {
+  content: ''; position: absolute; left: 15px; top: 40px; bottom: -12px;
+  width: 1px; background: var(--border-2);
+}
+.step-circle {
+  width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: 13px; font-weight: 600; flex-shrink: 0;
+  border: 1.5px solid var(--border-2); background: var(--bg-2); color: var(--text-3);
+}
+.step-circle.done { background: var(--green-light); color: var(--green); border-color: var(--green); }
+.step-circle.active { background: var(--amber-light); color: var(--amber); border-color: var(--amber); }
+.step-circle.rejected { background: var(--red-light); color: var(--red); border-color: var(--red); }
+.step-info { flex: 1; padding-top: 4px; }
+.step-name { font-size: 14px; font-weight: 500; }
+.step-meta { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+.step-comment { font-size: 12px; color: var(--text-2); background: var(--bg-2); border-radius: var(--radius); padding: 6px 10px; margin-top: 6px; }
+
+/* ── Field Builder ── */
+.field-list { display: flex; flex-direction: column; gap: 8px; }
+.field-item {
+  display: grid; grid-template-columns: 1fr 1fr auto auto;
+  gap: 8px; align-items: center;
+  background: var(--bg-2); border-radius: var(--radius); padding: 10px 12px;
+  border: 0.5px solid var(--border);
+}
+@media (max-width: 480px) { .field-item { grid-template-columns: 1fr 1fr auto; } }
+.field-item input, .field-item select { margin: 0; font-size: 13px; }
+
+/* ── Modal ── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+  z-index: 200; display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+}
+.modal {
+  background: var(--bg); border-radius: var(--radius-xl);
+  border: 0.5px solid var(--border); padding: 20px;
+  width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto;
+}
+.modal h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 0.5px solid var(--border); }
+
+/* ── Page Header ── */
+.page-header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+.page-title { font-size: 20px; font-weight: 600; }
+.page-back { color: var(--text-3); cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 4px; }
+.page-back:hover { color: var(--blue); }
+
+/* ── Mobile Nav Bottom ── */
+.mobile-nav {
+  display: none; position: fixed; bottom: 0; left: 0; right: 0;
+  background: var(--bg); border-top: 0.5px solid var(--border);
+  padding: 8px 0 calc(8px + var(--safe-bottom)); z-index: 100;
+  flex-direction: row;
+}
+.mobile-nav-item {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
+  font-size: 10px; color: var(--text-3); cursor: pointer; padding: 4px 0;
+}
+.mobile-nav-item.active { color: var(--blue); }
+.mobile-nav-icon { font-size: 20px; line-height: 1; }
+@media (max-width: 768px) {
+  .mobile-nav { display: flex; }
+  .main { padding-bottom: calc(80px + var(--safe-bottom)); }
+}
+
+/* ── PWA install banner ── */
+.pwa-banner {
+  background: var(--blue-light); border: 0.5px solid var(--blue);
+  border-radius: var(--radius-lg); padding: 12px 16px; margin-bottom: 16px;
+  display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--blue-dark);
+}
+.pwa-banner-close { margin-left: auto; cursor: pointer; opacity: 0.6; }
+
+/* ── Toast ── */
+.toast {
+  position: fixed; bottom: calc(80px + var(--safe-bottom) + 8px); left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  background: var(--text); color: var(--bg); padding: 10px 18px;
+  border-radius: 99px; font-size: 13px; z-index: 500; opacity: 0;
+  transition: opacity 0.2s, transform 0.2s; white-space: nowrap;
+  pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+@media (min-width: 769px) { .toast { bottom: 24px; } }
+
+/* ── Misc ── */
+.empty-state { text-align: center; padding: 48px 16px; color: var(--text-3); font-size: 14px; }
+.empty-icon { font-size: 40px; margin-bottom: 12px; opacity: 0.4; }
+.divider { border: none; border-top: 0.5px solid var(--border); margin: 14px 0; }
+.text-sm { font-size: 13px; }
+.text-xs { font-size: 12px; }
+.text-muted { color: var(--text-3); }
+.mt-1 { margin-top: 8px; } .mt-2 { margin-top: 14px; } .mt-3 { margin-top: 20px; }
+.mb-1 { margin-bottom: 8px; } .mb-2 { margin-bottom: 14px; }
+.flex { display: flex; } .items-center { align-items: center; } .gap-2 { gap: 8px; }
+.w-full { width: 100%; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script>
+// ══════════════════════════════════════════════
+// FormHub — Firebase 雲端多人共用版
+// ══════════════════════════════════════════════
+// 使用前請在下方填入你的 Firebase 設定
+// 取得方式：Firebase Console → 專案設定 → 你的應用程式 → firebaseConfig
+// ══════════════════════════════════════════════
+
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyAhf5pLLAAEwicxBp-sFvn5YIRf_CeZzl4",
+  authDomain:        "esuse-45350.firebaseapp.com",
+  projectId:         "esuse-45350",
+  storageBucket:     "esuse-45350.firebasestorage.app",
+  messagingSenderId: "848737933353",
+  appId:             "1:848737933353:web:47f296cc873259fe27a438"
+};
+
+// ── Firebase SDK (從 CDN 載入，不需安裝) ──
+let db, collection, doc, getDocs, getDoc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy;
+let firebaseReady = false;
+
+async function initFirebase() {
+  try {
+    const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js');
+    const fs = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+    const app = initializeApp(FIREBASE_CONFIG);
+    db = fs.getFirestore(app);
+    ({ collection, doc, getDocs, getDoc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy } = fs);
+    firebaseReady = true;
+  } catch (e) {
+    console.warn('Firebase 未設定，使用本機模式', e);
+  }
+}
+
+// ── 本機備用 ──
+const Local = {
+  get: k => { try { return JSON.parse(localStorage.getItem('fh_'+k)); } catch { return null; } },
+  set: (k, v) => localStorage.setItem('fh_'+k, JSON.stringify(v))
+};
+
+// ── 雲端資料層 ──
+const Cloud = {
+  async getForms() {
+    if (!firebaseReady) return Local.get('forms') || [];
+    try {
+      const snap = await getDocs(query(collection(db,'forms'), orderBy('date','desc')));
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch { return Local.get('forms') || []; }
+  },
+  async saveForm(form) {
+    const { id, ...data } = form;
+    Local.set('forms', (() => {
+      const arr = Local.get('forms') || [];
+      const i = arr.findIndex(f => f.id === id);
+      if (i >= 0) arr[i] = form; else arr.push(form);
+      return arr;
+    })());
+    if (!firebaseReady) return form;
+    try {
+      if (id && !id.startsWith('f_local_')) {
+        await setDoc(doc(db,'forms',id), data);
+        return form;
+      } else {
+        const ref = await addDoc(collection(db,'forms'), data);
+        return { ...form, id: ref.id };
+      }
+    } catch (e) { console.error(e); return form; }
+  },
+  async getConfig(key) {
+    if (!firebaseReady) return Local.get(key);
+    try {
+      const snap = await getDoc(doc(db,'config',key));
+      return snap.exists() ? snap.data() : Local.get(key);
+    } catch { return Local.get(key); }
+  },
+  async saveConfig(key, val) {
+    Local.set(key, val);
+    if (!firebaseReady) return;
+    try { await setDoc(doc(db,'config',key), typeof val === 'object' && !Array.isArray(val) ? val : { _val: val }); }
+    catch (e) { console.error(e); }
+  },
+  async getDepts() {
+    const raw = await this.getConfig('depts');
+    return Array.isArray(raw) ? raw : raw?._val || raw?.list || getDefaultDepts();
+  },
+  async saveDepts(d) {
+    Local.set('depts', d);
+    if (!firebaseReady) return;
+    try { await setDoc(doc(db,'config','depts'), { list: d }); } catch {}
+  },
+  async getFlows() {
+    const raw = await this.getConfig('flows');
+    return raw && !raw._val ? raw : getDefaultFlows();
+  },
+  async saveFlows(f) {
+    Local.set('flows', f);
+    if (!firebaseReady) return;
+    try { await setDoc(doc(db,'config','flows'), f); } catch {}
+  },
+  async getCounters() {
+    const raw = await this.getConfig('counters');
+    return raw && !raw._val ? raw : {};
+  },
+  async saveCounters(c) {
+    Local.set('counters', c);
+    if (!firebaseReady) return;
+    try { await setDoc(doc(db,'config','counters'), c); } catch {}
+  }
+};
+
+// ── State ──
+const S = {
+  page: 'dashboard', deptFilter: null, formId: null,
+  modal: null, sidebar: false, searchQ: '', statusFilter: '',
+  forms: [], depts: [], flows: {}, loading: true
+};
+
+// ── Helpers ──
+const fmt = n => 'NT$ ' + Math.round(Number(n)||0).toLocaleString();
+const pad = n => String(n).padStart(3,'0');
+const now = () => new Date().toLocaleString('zh-TW',{hour12:false});
+const today = () => new Date().toISOString().slice(0,10);
+const calcTotal = items => (items||[]).reduce((s,i)=>s+(Number(i.qty)||0)*(Number(i.price)||0),0);
+const statusLabel = s => ({draft:'草稿',pending:'審核中',approved:'已核准',rejected:'已退回'}[s]||s);
+const statusCls   = s => ({draft:'badge-draft',pending:'badge-pending',approved:'badge-approved',rejected:'badge-rejected'}[s]||'badge-draft');
+
+async function genSeq(deptId) {
+  const c = await Cloud.getCounters();
+  const n = c[deptId] || 1;
+  c[deptId] = n + 1;
+  await Cloud.saveCounters(c);
+  return `${deptId}-${new Date().getFullYear()}-${pad(n)}`;
+}
+
+function getDefaultDepts() {
+  return [
+    { id:'PUR', name:'採購部', color:'blue', prefix:'PUR', fields:[
+      {id:'f1',label:'廠商名稱',type:'text',required:true},
+      {id:'f2',label:'採購類別',type:'select',required:false,options:'辦公設備,IT設備,消耗品,服務'},
+      {id:'f3',label:'預算金額',type:'number',required:true},
+      {id:'f4',label:'備註',type:'textarea',required:false}]},
+    { id:'SAL', name:'業務部', color:'teal', prefix:'SAL', fields:[
+      {id:'f1',label:'客戶名稱',type:'text',required:true},
+      {id:'f2',label:'報價金額',type:'number',required:true},
+      {id:'f3',label:'有效期限',type:'date',required:false},
+      {id:'f4',label:'備註',type:'textarea',required:false}]},
+    { id:'HR',  name:'人資部', color:'purple', prefix:'HR', fields:[
+      {id:'f1',label:'申請項目',type:'select',required:true,options:'加班,出差,請假,招募'},
+      {id:'f2',label:'日期',type:'date',required:true},
+      {id:'f3',label:'說明',type:'textarea',required:true}]},
+    { id:'WH',  name:'倉儲部', color:'amber', prefix:'WH', fields:[
+      {id:'f1',label:'品項說明',type:'text',required:true},
+      {id:'f2',label:'異動類型',type:'select',required:true,options:'入庫,出庫,調撥,盤點'},
+      {id:'f3',label:'倉庫位置',type:'text',required:false},
+      {id:'f4',label:'備註',type:'textarea',required:false}]}
+  ];
+}
+function getDefaultFlows() {
+  return {
+    PUR:[{role:'部門主管',userId:'mgr1'},{role:'財務長',userId:'cfo'}],
+    SAL:[{role:'業務主管',userId:'mgr2'}],
+    HR:[{role:'人資主管',userId:'mgr3'},{role:'總經理',userId:'gm'}],
+    WH:[{role:'倉儲主管',userId:'mgr4'}]
+  };
+}
+
+// ── Boot ──
+const app = document.getElementById('app');
+(async () => {
+  await initFirebase();
+  S.loading = true; render();
+  const [forms, depts, flows] = await Promise.all([Cloud.getForms(), Cloud.getDepts(), Cloud.getFlows()]);
+  S.forms = forms; S.depts = depts; S.flows = flows;
+  if (!forms.length) {
+    await Cloud.saveCounters({PUR:3,SAL:1,HR:1,WH:1});
+    const samples = [
+      {id:'f_local_001',deptId:'PUR',seq:'PUR-2026-001',ver:2,applicant:'王大明',date:'2026-01-15',status:'approved',
+       fields:{f1:'立即科技股份有限公司',f2:'IT設備',f3:'175000',f4:'年度採購'},
+       items:[{id:'i1',name:'筆記型電腦',qty:5,unit:'台',price:35000}],
+       approvals:[{step:0,role:'部門主管',name:'張主管',status:'approved',time:'2026-01-17 10:30',comment:'同意'}],
+       history:[{ver:'v1',who:'王大明',time:'2026-01-15 09:00',reason:'初次建立',changes:[]},{ver:'v2',who:'王大明',time:'2026-01-16 14:00',reason:'廠商名稱更正',changes:[{field:'廠商名稱',old:'立即科技',new:'立即科技股份有限公司'}]}]},
+      {id:'f_local_002',deptId:'PUR',seq:'PUR-2026-002',ver:1,applicant:'李小花',date:'2026-03-01',status:'pending',
+       fields:{f1:'台灣大哥大',f2:'服務',f3:'13980',f4:'門號續約'},
+       items:[{id:'i1',name:'商務門號',qty:20,unit:'門',price:699}],
+       approvals:[{step:0,role:'部門主管',name:'',status:'pending',time:null,comment:''}],
+       history:[{ver:'v1',who:'李小花',time:'2026-03-01 11:00',reason:'初次建立',changes:[]}]}
+    ];
+    for (const f of samples) await Cloud.saveForm(f);
+    S.forms = await Cloud.getForms();
+  }
+  S.loading = false; render();
+  if (firebaseReady) {
+    onSnapshot(collection(db,'forms'), snap => {
+      S.forms = snap.docs.map(d=>({id:d.id,...d.data()}));
+      if (!S.loading) render();
+    });
+  }
+})();
+
+// ── Render ──
+function render() {
+  app.innerHTML = `
+    ${topbar()}
+    <div class="overlay${S.sidebar?' show':''}" onclick="S.sidebar=false;render()"></div>
+    <div class="sidebar${S.sidebar?' open':''}">${sidebar()}</div>
+    <div class="main">${S.loading ? loading() : page()}</div>
+    ${mobileNav()}
+    <div class="toast" id="toast"></div>
+    ${S.modal ? modal() : ''}`;
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+  pwaBanner();
+}
+
+function loading() {
+  return `<div class="empty-state" style="padding-top:80px;">
+    <div style="font-size:32px;animation:spin 1s linear infinite;display:inline-block;">⟳</div>
+    <div style="margin-top:12px;">連接雲端資料庫中...</div>
+  </div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>`;
+}
+
+function topbar() {
+  const sync = firebaseReady
+    ? `<span style="font-size:11px;padding:2px 8px;background:var(--green-light);color:var(--green);border-radius:99px;white-space:nowrap;">● 雲端同步</span>`
+    : `<span style="font-size:11px;padding:2px 8px;background:var(--amber-light);color:var(--amber);border-radius:99px;white-space:nowrap;">○ 本機模式</span>`;
+  return `<div class="topbar">
+    <div class="flex items-center gap-2">
+      <button class="btn btn-icon" onclick="S.sidebar=!S.sidebar;render()" style="border:none;background:none;">
+        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+      </button>
+      <span class="topbar-logo">FormHub</span>${sync}
+    </div>
+    <button class="btn btn-sm btn-primary" onclick="go('new-form')">+ 新增</button>
+  </div>`;
+}
+
+function sidebar() {
+  const pend = S.forms.filter(f=>f.status==='pending').length;
+  return `<div class="sidebar-section">
+    <div class="sidebar-label">主選單</div>
+    <div class="sidebar-item${S.page==='dashboard'?' active':''}" onclick="go('dashboard')"><span>📊</span> 總覽</div>
+    <div class="sidebar-item${S.page==='all-forms'&&!S.deptFilter?' active':''}" onclick="goDept(null)">
+      <span>📋</span> 全部表單
+      ${pend>0?`<span class="badge badge-pending" style="margin-left:auto;font-size:10px;">${pend}</span>`:''}
+    </div>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-label">部門</div>
+    ${S.depts.map(d=>`<div class="sidebar-item${S.deptFilter===d.id&&S.page==='all-forms'?' active':''}" onclick="goDept('${d.id}')">
+      <span class="sidebar-dot" style="background:var(--${d.color})"></span>${d.name}
+      <span class="text-xs text-muted" style="margin-left:auto;">${S.forms.filter(f=>f.deptId===d.id).length}</span>
+    </div>`).join('')}
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-label">設定</div>
+    <div class="sidebar-item${S.page==='settings'?' active':''}" onclick="go('settings')"><span>⚙️</span> 表單與部門設定</div>
+  </div>`;
+}
+
+function mobileNav() {
+  return `<nav class="mobile-nav">
+    <div class="mobile-nav-item${S.page==='dashboard'?' active':''}" onclick="go('dashboard')"><span class="mobile-nav-icon">📊</span>總覽</div>
+    <div class="mobile-nav-item${S.page==='all-forms'?' active':''}" onclick="goDept(null)"><span class="mobile-nav-icon">📋</span>表單</div>
+    <div class="mobile-nav-item" onclick="go('new-form')"><span class="mobile-nav-icon" style="font-size:26px;color:var(--blue);">＋</span>新增</div>
+    <div class="mobile-nav-item${S.page==='settings'?' active':''}" onclick="go('settings')"><span class="mobile-nav-icon">⚙️</span>設定</div>
+  </nav>`;
+}
+
+function page() {
+  switch(S.page) {
+    case 'dashboard': return pgDashboard();
+    case 'all-forms': return pgList();
+    case 'form-view': return pgView();
+    case 'new-form':  return pgNew();
+    case 'edit-form': return pgEdit();
+    case 'approve':   return pgApprove();
+    case 'settings':  return pgSettings();
+    default: return pgDashboard();
+  }
+}
+
+function pgDashboard() {
+  const f = S.forms, pend = f.filter(x=>x.status==='pending');
+  const recent = [...f].sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,6);
+  return `<div>
+    <div class="page-header"><h1 class="page-title">總覽</h1></div>
+    ${!firebaseReady?`<div class="pwa-banner" style="background:var(--amber-light);border-color:var(--amber);color:var(--amber);">
+      ⚠️ 本機模式：請在 <code>src/app.js</code> 填入 Firebase 設定，即可多人共用資料。</div>`:''}
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-label">全部單據</div><div class="stat-value">${f.length}</div></div>
+      <div class="stat-card"><div class="stat-label">草稿</div><div class="stat-value" style="color:var(--gray)">${f.filter(x=>x.status==='draft').length}</div></div>
+      <div class="stat-card"><div class="stat-label">審核中</div><div class="stat-value" style="color:var(--amber)">${pend.length}</div></div>
+      <div class="stat-card"><div class="stat-label">已核准</div><div class="stat-value" style="color:var(--green)">${f.filter(x=>x.status==='approved').length}</div></div>
+    </div>
+    ${pend.length?`<div class="card"><div class="card-title">待簽核 (${pend.length})</div>
+      <div class="table-wrap"><table><thead><tr><th>序號</th><th>申請人</th><th>部門</th><th>日期</th><th></th></tr></thead>
+      <tbody>${pend.map(f=>{const d=S.depts.find(d=>d.id===f.deptId)||{};return`<tr onclick="goForm('${f.id}')">
+        <td class="td-mono">${f.seq}</td><td>${f.applicant}</td>
+        <td><span class="badge badge-blue">${d.name||''}</span></td>
+        <td class="text-muted text-xs">${f.date}</td>
+        <td><button class="btn btn-sm btn-primary" onclick="event.stopPropagation();goApprove('${f.id}')">審核</button></td>
+      </tr>`;}).join('')}</tbody></table></div></div>`:''}
+    <div class="card"><div class="card-title">最近單據</div>
+      <div class="table-wrap"><table><thead><tr><th>序號</th><th>申請人</th><th>狀態</th><th>日期</th></tr></thead>
+      <tbody>${recent.map(f=>`<tr onclick="goForm('${f.id}')">
+        <td class="td-mono">${f.seq}</td><td>${f.applicant}</td>
+        <td><span class="badge ${statusCls(f.status)}">${statusLabel(f.status)}</span></td>
+        <td class="text-muted text-xs">${f.date}</td>
+      </tr>`).join('')}</tbody></table></div></div>
+  </div>`;
+}
+
+function pgList() {
+  let forms = S.forms;
+  if (S.deptFilter) forms = forms.filter(f=>f.deptId===S.deptFilter);
+  if (S.statusFilter) forms = forms.filter(f=>f.status===S.statusFilter);
+  if (S.searchQ) { const q=S.searchQ.toLowerCase(); forms=forms.filter(f=>f.seq?.toLowerCase().includes(q)||f.applicant?.includes(q)||Object.values(f.fields||{}).some(v=>String(v).toLowerCase().includes(q))); }
+  const dept = S.depts.find(d=>d.id===S.deptFilter);
+  return `<div>
+    <div class="page-header">
+      <h1 class="page-title">${dept?dept.name+'表單':'全部表單'}</h1>
+      <div style="margin-left:auto;"><button class="btn btn-primary" onclick="go('new-form')">+ 新增申請單</button></div>
+    </div>
+    <div class="toolbar">
+      <div class="search-box"><span class="search-icon">🔍</span>
+        <input type="text" placeholder="搜尋序號、申請人..." value="${S.searchQ}" oninput="S.searchQ=this.value;render()" style="padding-left:30px;width:190px;"></div>
+      <select onchange="S.statusFilter=this.value;render()" style="font-size:13px;">
+        <option value="">全部狀態</option>
+        <option value="draft"${S.statusFilter==='draft'?' selected':''}>草稿</option>
+        <option value="pending"${S.statusFilter==='pending'?' selected':''}>審核中</option>
+        <option value="approved"${S.statusFilter==='approved'?' selected':''}>已核准</option>
+        <option value="rejected"${S.statusFilter==='rejected'?' selected':''}>已退回</option>
+      </select>
+      ${!S.deptFilter?`<select onchange="S.deptFilter=this.value||null;render()" style="font-size:13px;">
+        <option value="">全部部門</option>
+        ${S.depts.map(d=>`<option value="${d.id}"${S.deptFilter===d.id?' selected':''}>${d.name}</option>`).join('')}
+      </select>`:''}
+    </div>
+    ${forms.length===0?`<div class="empty-state"><div class="empty-icon">📭</div>沒有符合的表單</div>`:`
+    <div class="table-wrap"><table>
+      <thead><tr><th>序號</th><th>版本</th><th>申請人</th><th>部門</th><th>狀態</th><th>日期</th><th></th></tr></thead>
+      <tbody>${forms.map(f=>{const d=S.depts.find(d=>d.id===f.deptId)||{};return`<tr onclick="goForm('${f.id}')">
+        <td class="td-mono">${f.seq}</td>
+        <td><span class="badge badge-draft">v${f.ver||1}</span></td>
+        <td>${f.applicant}</td>
+        <td><span class="badge badge-blue">${d.name||''}</span></td>
+        <td><span class="badge ${statusCls(f.status)}">${statusLabel(f.status)}</span></td>
+        <td class="text-muted text-xs">${f.date}</td>
+        <td><button class="btn btn-sm" onclick="event.stopPropagation();goForm('${f.id}')">查看</button></td>
+      </tr>`;}).join('')}</tbody>
+    </table></div>`}
+  </div>`;
+}
+
+function pgView() {
+  const f = S.forms.find(x=>x.id===S.formId);
+  if (!f) return `<div class="empty-state">找不到表單</div>`;
+  const dept = S.depts.find(d=>d.id===f.deptId)||{};
+  const flowDef = S.flows[f.deptId]||[];
+  const acts = [];
+  if (f.status==='draft'||f.status==='rejected') acts.push(`<button class="btn" onclick="go('edit-form')">編輯修訂</button>`);
+  if (f.status==='draft') acts.push(`<button class="btn btn-primary" onclick="doReview('${f.id}')">送出審核</button>`);
+  if (f.status==='pending') acts.push(`<button class="btn btn-primary" onclick="goApprove('${f.id}')">核准 / 退回</button>`);
+  return `<div>
+    <div class="page-header">
+      <span class="page-back" onclick="goDept(S.deptFilter)">← 返回</span>
+      <h1 class="page-title" style="font-family:monospace;font-size:16px;">${f.seq}</h1>
+      <span class="badge ${statusCls(f.status)}" style="margin-left:8px;">${statusLabel(f.status)}</span>
+    </div>
+    ${acts.length?`<div class="flex gap-2 mb-2" style="flex-wrap:wrap;">${acts.join('')}</div>`:''}
+    <div class="card"><div class="card-title">基本資料</div>
+      <div class="form-grid">
+        <span class="flabel">序號</span><div><span class="seq-badge">${f.seq}</span></div>
+        <span class="flabel">版本</span><span><span class="badge badge-blue">v${f.ver||1}</span></span>
+        <span class="flabel">申請人</span><span>${f.applicant}</span>
+        <span class="flabel">部門</span><span>${dept.name||''}</span>
+        <span class="flabel">申請日期</span><span>${f.date}</span>
+        ${(dept.fields||[]).map(fd=>`<span class="flabel">${fd.label}</span><span>${f.fields?.[fd.id]||'<span class="text-muted">—</span>'}</span>`).join('')}
+      </div>
+    </div>
+    <div class="card"><div class="card-title">品項明細（子表單）</div>
+      <div style="overflow-x:auto;"><table class="subtable">
+        <thead><tr><th>品名</th><th>數量</th><th>單位</th><th>單價</th><th>小計</th></tr></thead>
+        <tbody>${(f.items||[]).map(it=>`<tr><td>${it.name}</td><td>${it.qty}</td><td>${it.unit}</td><td>${fmt(it.price)}</td><td>${fmt(it.qty*it.price)}</td></tr>`).join('')}</tbody>
+        <tfoot><tr><td colspan="4" style="text-align:right;padding:8px;font-size:13px;">合計</td><td style="font-weight:600;color:var(--blue);padding:8px;">${fmt(calcTotal(f.items))}</td></tr></tfoot>
+      </table></div>
+    </div>
+    <div class="card"><div class="card-title">簽核流程</div>
+      <div class="approval-steps">
+        ${flowDef.length===0?'<div class="text-muted text-sm">此部門尚未設定簽核流程</div>':
+          flowDef.map((step,i)=>{
+            const ap=(f.approvals||[]).find(a=>a.step===i);
+            const cls=ap?.status==='approved'?'done':ap?.status==='rejected'?'rejected':
+              (f.status==='pending'&&(f.approvals||[]).filter(a=>a.status==='approved').length===i)?'active':'';
+            return`<div class="approval-step">
+              <div class="step-circle ${cls}">${ap?.status==='approved'?'✓':ap?.status==='rejected'?'✗':i+1}</div>
+              <div class="step-info">
+                <div class="step-name">${step.role}</div>
+                <div class="step-meta">${ap?.name?ap.name+' · '+ap.time:'等待審核'}</div>
+                ${ap?.comment?`<div class="step-comment">${ap.comment}</div>`:''}
+              </div></div>`;}).join('')}
+      </div>
+    </div>
+    <div class="card"><div class="card-title">修訂紀錄</div>
+      ${[...(f.history||[])].reverse().map(h=>`<div class="rev-item">
+        <div class="rev-meta"><span class="rev-ver">${h.ver}</span><span class="rev-who">${h.who} · ${h.time}</span></div>
+        <div class="rev-changes">${h.changes.length===0?'<span class="text-muted text-xs">初次建立</span>':
+          h.changes.map(c=>`<div class="rev-change"><span class="rev-field">${c.field}：</span><span class="rev-old">${c.old}</span> → <span class="rev-new">${c.new}</span></div>`).join('')}</div>
+        <div class="rev-reason">原因：${h.reason}</div>
+      </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+function pgNew() {
+  const selId = document.getElementById('new-dept')?.value || S.deptFilter || S.depts[0]?.id;
+  const dept = S.depts.find(d=>d.id===selId)||S.depts[0]||{};
+  const c = Local.get('counters')||{};
+  const prev = `${dept.prefix||dept.id}-${new Date().getFullYear()}-${pad(c[dept.id]||1)}`;
+  return `<div>
+    <div class="page-header"><span class="page-back" onclick="goDept(S.deptFilter)">← 取消</span><h1 class="page-title">新增申請單</h1></div>
+    <div class="card"><div class="card-title">選擇部門</div>
+      <select id="new-dept" onchange="render()" style="max-width:300px;">
+        ${S.depts.map(d=>`<option value="${d.id}"${d.id===selId?' selected':''}>${d.name}</option>`).join('')}
+      </select>
+    </div>
+    <div class="card"><div class="card-title">基本資料</div>
+      <div class="form-grid">
+        <span class="flabel">序號</span><div><span class="seq-badge">${prev}</span> <span class="text-xs text-muted">自動產生</span></div>
+        <label class="flabel required">申請人</label><input type="text" id="new-applicant" placeholder="姓名">
+        ${(dept.fields||[]).map(fd=>`<label class="flabel${fd.required?' required':''}">${fd.label}</label>${fieldInput('nf-'+fd.id,fd)}`).join('')}
+      </div>
+    </div>
+    <div class="card"><div class="card-title">品項明細（子表單）</div>
+      <div style="overflow-x:auto;"><table class="subtable">
+        <thead><tr><th>品名</th><th style="width:70px;">數量</th><th style="width:60px;">單位</th><th style="width:100px;">單價</th><th style="width:100px;">小計</th><th style="width:36px;"></th></tr></thead>
+        <tbody id="items-body"><tr id="item-row-1">
+          <td><input type="text" placeholder="品名"></td>
+          <td><input type="number" value="1" min="1" oninput="subUp(this)"></td>
+          <td><input type="text" value="個"></td>
+          <td><input type="number" value="0" min="0" oninput="subUp(this)"></td>
+          <td id="sub-1" class="text-muted text-xs">NT$ 0</td>
+          <td><button class="btn btn-sm btn-danger" onclick="rmRow(this)">✕</button></td>
+        </tr></tbody>
+        <tfoot><tr><td colspan="4" style="text-align:right;font-size:13px;">合計</td><td id="items-total" style="font-weight:600;color:var(--blue);">NT$ 0</td><td></td></tr></tfoot>
+      </table></div>
+      <button class="btn btn-sm mt-1" onclick="addRow()">+ 新增品項</button>
+    </div>
+    <div class="flex gap-2" style="justify-content:flex-end;flex-wrap:wrap;">
+      <button class="btn" onclick="doSave('draft')">儲存草稿</button>
+      <button class="btn btn-primary" onclick="doSave('pending')">直接送審</button>
+    </div>
+  </div>`;
+}
+
+function pgEdit() {
+  const f = S.forms.find(x=>x.id===S.formId); if (!f) return '';
+  const dept = S.depts.find(d=>d.id===f.deptId)||{};
+  return `<div>
+    <div class="page-header"><span class="page-back" onclick="goForm(S.formId)">← 取消</span>
+      <h1 class="page-title">編輯 — <span style="font-family:monospace;font-size:16px;">${f.seq}</span></h1></div>
+    <div class="card"><div class="card-title">修改欄位</div>
+      <div class="form-grid">
+        ${(dept.fields||[]).map(fd=>`<label class="flabel${fd.required?' required':''}">${fd.label}</label>${fieldInput('ef-'+fd.id,fd,f.fields?.[fd.id]||'')}`).join('')}
+      </div>
+    </div>
+    <div class="card"><div class="card-title">品項明細</div>
+      <div style="overflow-x:auto;"><table class="subtable">
+        <thead><tr><th>品名</th><th>數量</th><th>單位</th><th>單價</th><th>小計</th><th></th></tr></thead>
+        <tbody id="items-body">
+          ${(f.items||[]).map((it,i)=>`<tr id="item-row-${i+1}">
+            <td><input type="text" value="${it.name}"></td>
+            <td><input type="number" value="${it.qty}" min="1" oninput="subUp(this)"></td>
+            <td><input type="text" value="${it.unit}"></td>
+            <td><input type="number" value="${it.price}" min="0" oninput="subUp(this)"></td>
+            <td id="sub-${i+1}" class="text-muted text-xs">${fmt(it.qty*it.price)}</td>
+            <td><button class="btn btn-sm btn-danger" onclick="rmRow(this)">✕</button></td>
+          </tr>`).join('')}
+        </tbody>
+        <tfoot><tr><td colspan="4" style="text-align:right;font-size:13px;">合計</td><td id="items-total" style="font-weight:600;color:var(--blue);">${fmt(calcTotal(f.items))}</td><td></td></tr></tfoot>
+      </table></div>
+      <button class="btn btn-sm mt-1" onclick="addRow()">+ 新增品項</button>
+    </div>
+    <div class="card" style="border-left:3px solid var(--amber);border-radius:0 var(--radius-lg) var(--radius-lg) 0;">
+      <div class="card-title">修訂資訊（必填）</div>
+      <div class="form-grid">
+        <label class="flabel required">修改人</label><input type="text" id="edit-who" placeholder="你的姓名">
+        <label class="flabel required">修改原因</label><textarea id="edit-reason" placeholder="說明修改原因..."></textarea>
+      </div>
+    </div>
+    <div class="flex gap-2" style="justify-content:flex-end;">
+      <button class="btn btn-primary" onclick="doEdit('${f.id}')">儲存修訂</button>
+    </div>
+  </div>`;
+}
+
+function pgApprove() {
+  const f = S.forms.find(x=>x.id===S.formId); if (!f) return '';
+  return `<div>
+    <div class="page-header"><span class="page-back" onclick="goForm(S.formId)">← 返回</span>
+      <h1 class="page-title">審核 — ${f.seq}</h1></div>
+    <div class="card" style="max-width:500px;"><div class="card-title">審核決定</div>
+      <div class="form-grid">
+        <label class="flabel required">審核人</label><input type="text" id="ap-who" placeholder="你的姓名">
+        <label class="flabel required">決定</label>
+        <select id="ap-decision"><option value="approved">核准</option><option value="rejected">退回</option></select>
+        <label class="flabel">審核意見</label><textarea id="ap-comment" placeholder="選填..."></textarea>
+      </div>
+      <div class="flex gap-2 mt-2" style="justify-content:flex-end;">
+        <button class="btn" onclick="goForm(S.formId)">取消</button>
+        <button class="btn btn-primary" onclick="doApprove('${f.id}')">送出審核</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function pgSettings() {
+  return `<div>
+    <div class="page-header"><h1 class="page-title">表單與部門設定</h1></div>
+    ${S.depts.map(dept=>`<div class="card">
+      <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>${dept.name} <span class="badge badge-blue" style="font-size:11px;">${dept.prefix}</span></span>
+        <button class="btn btn-sm btn-primary" onclick="addField('${dept.id}')">+ 新增欄位</button>
+      </div>
+      <div class="field-list">
+        ${(dept.fields||[]).map(fd=>`<div class="field-item">
+          <input type="text" value="${fd.label}" placeholder="欄位名稱" onchange="updField('${dept.id}','${fd.id}','label',this.value)">
+          <select onchange="updField('${dept.id}','${fd.id}','type',this.value)">
+            <option value="text"${fd.type==='text'?' selected':''}>文字</option>
+            <option value="number"${fd.type==='number'?' selected':''}>數字</option>
+            <option value="date"${fd.type==='date'?' selected':''}>日期</option>
+            <option value="select"${fd.type==='select'?' selected':''}>下拉選單</option>
+            <option value="textarea"${fd.type==='textarea'?' selected':''}>多行文字</option>
+          </select>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;white-space:nowrap;">
+            <input type="checkbox"${fd.required?' checked':''} onchange="updField('${dept.id}','${fd.id}','required',this.checked)">必填
+          </label>
+          <button class="btn btn-sm btn-danger" onclick="delField('${dept.id}','${fd.id}')">刪除</button>
+        </div>
+        ${fd.type==='select'?`<div style="padding:6px 12px;background:var(--bg-3);border-radius:var(--radius);margin-top:-4px;">
+          <label style="font-size:12px;color:var(--text-3);">選項（逗號分隔）：</label>
+          <input type="text" value="${fd.options||''}" placeholder="選項1,選項2" style="margin-top:4px;"
+            onchange="updField('${dept.id}','${fd.id}','options',this.value)">
+        </div>`:''}`).join('')}
+      </div>
+      <div class="divider"></div>
+      <div style="font-size:13px;font-weight:500;color:var(--text-2);margin-bottom:10px;">簽核流程</div>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px;">
+        ${(S.flows[dept.id]||[]).map((step,i)=>`<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;background:var(--bg-2);padding:8px 10px;border-radius:var(--radius);border:0.5px solid var(--border);">
+          <input type="text" value="${step.role}" placeholder="職稱" onchange="updFlow('${dept.id}',${i},'role',this.value)">
+          <input type="text" value="${step.userId}" placeholder="使用者ID" onchange="updFlow('${dept.id}',${i},'userId',this.value)">
+          <button class="btn btn-sm btn-danger" onclick="delFlow('${dept.id}',${i})">刪除</button>
+        </div>`).join('')}
+      </div>
+      <button class="btn btn-sm" onclick="addFlow('${dept.id}')">+ 新增簽核關卡</button>
+    </div>`).join('')}
+    <div class="card" style="border:2px dashed var(--border-2);background:transparent;">
+      <div style="text-align:center;padding:16px;">
+        <button class="btn btn-primary" onclick="S.modal='add-dept';render()">+ 新增部門</button>
+        <p class="text-xs text-muted mt-1">可無限新增部門，每個部門獨立欄位與簽核流程</p>
+      </div>
+    </div>
+  </div>`;
+}
+
+function modal() {
+  if (S.modal==='add-dept') return `<div class="modal-overlay" onclick="if(event.target===this){S.modal=null;render()}">
+    <div class="modal"><h3>新增部門</h3>
+      <div class="form-grid">
+        <label class="flabel required">部門名稱</label><input type="text" id="m-name" placeholder="如：財務部">
+        <label class="flabel required">前綴代碼</label><input type="text" id="m-prefix" placeholder="如：FIN" style="text-transform:uppercase;">
+        <label class="flabel">顏色</label>
+        <select id="m-color"><option value="blue">藍色</option><option value="teal">綠藍</option><option value="purple">紫色</option><option value="amber">琥珀</option></select>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="S.modal=null;render()">取消</button>
+        <button class="btn btn-primary" onclick="saveDept()">新增</button>
+      </div>
+    </div>
+  </div>`;
+  return '';
+}
+
+function fieldInput(id, fd, val='') {
+  switch(fd.type) {
+    case 'number':   return `<input type="number" id="${id}" value="${val}" placeholder="0">`;
+    case 'date':     return `<input type="date" id="${id}" value="${val}">`;
+    case 'textarea': return `<textarea id="${id}" placeholder="${fd.label}...">${val}</textarea>`;
+    case 'select': { const opts=(fd.options||'').split(',').map(o=>o.trim()).filter(Boolean);
+      return `<select id="${id}"><option value="">請選擇...</option>${opts.map(o=>`<option${o===val?' selected':''}>${o}</option>`).join('')}</select>`; }
+    default: return `<input type="text" id="${id}" value="${val}" placeholder="${fd.label}">`;
+  }
+}
+
+// ── Navigation ──
+function go(p) { S.page=p; S.sidebar=false; window.scrollTo(0,0); render(); }
+function goDept(id) { S.page='all-forms'; S.deptFilter=id; S.sidebar=false; render(); }
+function goForm(id) { S.formId=id; S.page='form-view'; window.scrollTo(0,0); render(); }
+function goApprove(id) { S.formId=id; S.page='approve'; window.scrollTo(0,0); render(); }
+
+function toast(msg, d=2500) {
+  const el=document.getElementById('toast'); if(!el) return;
+  el.textContent=msg; el.classList.add('show');
+  clearTimeout(el._t); el._t=setTimeout(()=>el.classList.remove('show'),d);
+}
+
+// ── Sub-table helpers ──
+let rowN = 1;
+function addRow() {
+  rowN++;
+  const tbody = document.getElementById('items-body'); if (!tbody) return;
+  const tr = document.createElement('tr'); tr.id='item-row-'+rowN;
+  tr.innerHTML=`<td><input type="text" placeholder="品名"></td>
+    <td><input type="number" value="1" min="1" oninput="subUp(this)"></td>
+    <td><input type="text" value="個"></td>
+    <td><input type="number" value="0" min="0" oninput="subUp(this)"></td>
+    <td id="sub-${rowN}" class="text-muted text-xs">NT$ 0</td>
+    <td><button class="btn btn-sm btn-danger" onclick="rmRow(this)">✕</button></td>`;
+  tbody.appendChild(tr);
+}
+function rmRow(btn) { btn.closest('tr').remove(); reTot(); }
+function subUp(input) {
+  const row=input.closest('tr'), ins=row.querySelectorAll('input[type=number]');
+  const s=Number(ins[0]?.value||0)*Number(ins[1]?.value||0);
+  const c=row.querySelector('td:nth-child(5)'); if(c) c.textContent=fmt(s);
+  reTot();
+}
+function reTot() {
+  let t=0; document.querySelectorAll('#items-body tr').forEach(tr=>{
+    const ins=tr.querySelectorAll('input[type=number]');
+    if(ins.length>=2) t+=Number(ins[0].value||0)*Number(ins[1].value||0);
+  });
+  const el=document.getElementById('items-total'); if(el) el.textContent=fmt(t);
+}
+function collectRows() {
+  const items=[];
+  document.querySelectorAll('#items-body tr').forEach((tr,i)=>{
+    const ins=tr.querySelectorAll('input');
+    if(ins.length>=4&&ins[0].value.trim())
+      items.push({id:'i'+(i+1),name:ins[0].value.trim(),qty:Number(ins[1].value)||1,unit:ins[2].value||'個',price:Number(ins[3].value)||0});
+  });
+  return items;
+}
+
+// ── Async actions ──
+async function doSave(status) {
+  const deptId = document.getElementById('new-dept')?.value;
+  const applicant = document.getElementById('new-applicant')?.value?.trim();
+  if (!applicant) { toast('請填寫申請人'); return; }
+  const dept = S.depts.find(d=>d.id===deptId); if (!dept) return;
+  const fields={};
+  for (const fd of dept.fields||[]) {
+    const el=document.getElementById('nf-'+fd.id);
+    if (fd.required&&(!el||!el.value.trim())) { toast(`請填寫「${fd.label}」`); return; }
+    if (el) fields[fd.id]=el.value;
+  }
+  const seq = await genSeq(deptId);
+  const flowDef = S.flows[deptId]||[];
+  const form = { id:'f_local_'+Date.now(), deptId, seq, ver:1, applicant, date:today(), status, fields, items:collectRows(),
+    approvals: status==='pending'?flowDef.map((s,i)=>({step:i,role:s.role,userId:s.userId,name:'',status:i===0?'pending':'waiting',time:null,comment:''})):[],
+    history:[{ver:'v1',who:applicant,time:now(),reason:'初次建立',changes:[]}] };
+  toast('儲存中...', 8000);
+  try {
+    const saved = await Cloud.saveForm(form);
+    S.forms = await Cloud.getForms();
+    toast(status==='draft'?'已儲存草稿':'已送出審核');
+    goForm(saved.id);
+  } catch { toast('儲存失敗'); }
+}
+
+async function doEdit(id) {
+  const who=document.getElementById('edit-who')?.value?.trim();
+  const reason=document.getElementById('edit-reason')?.value?.trim();
+  if (!who||!reason) { toast('請填寫修改人與修改原因'); return; }
+  const f={...S.forms.find(x=>x.id===id)}; f.fields={...f.fields};
+  const dept=S.depts.find(d=>d.id===f.deptId)||{};
+  const changes=[];
+  for (const fd of dept.fields||[]) {
+    const el=document.getElementById('ef-'+fd.id);
+    if (el&&el.value!==(f.fields?.[fd.id]||'')) {
+      changes.push({field:fd.label,old:f.fields?.[fd.id]||'（空）',new:el.value});
+      f.fields[fd.id]=el.value;
+    }
+  }
+  const ni=collectRows();
+  if (JSON.stringify(ni)!==JSON.stringify(f.items)) { changes.push({field:'品項',old:`${f.items?.length||0}項`,new:`${ni.length}項`}); f.items=ni; }
+  f.ver=(f.ver||1)+1;
+  f.history=[...(f.history||[]),{ver:'v'+f.ver,who,time:now(),reason,changes}];
+  toast('儲存中...', 8000);
+  try { await Cloud.saveForm(f); S.forms=await Cloud.getForms(); toast('修訂已儲存（v'+f.ver+'）'); goForm(id); }
+  catch { toast('儲存失敗'); }
+}
+
+async function doReview(id) {
+  const f={...S.forms.find(x=>x.id===id)};
+  const flowDef=S.flows[f.deptId]||[];
+  f.status='pending';
+  f.approvals=flowDef.map((s,i)=>({step:i,role:s.role,userId:s.userId,name:'',status:i===0?'pending':'waiting',time:null,comment:''}));
+  f.history=[...(f.history||[]),{ver:'v'+(f.ver||1),who:f.applicant,time:now(),reason:'送出審核',changes:[{field:'狀態',old:'草稿',new:'審核中'}]}];
+  await Cloud.saveForm(f); S.forms=await Cloud.getForms();
+  toast('已送出審核'); goForm(id);
+}
+
+async function doApprove(id) {
+  const who=document.getElementById('ap-who')?.value?.trim();
+  const decision=document.getElementById('ap-decision')?.value;
+  const comment=document.getElementById('ap-comment')?.value?.trim();
+  if (!who) { toast('請填寫審核人'); return; }
+  const f={...S.forms.find(x=>x.id===id)}; f.approvals=[...(f.approvals||[])];
+  const idx=f.approvals.findIndex(a=>a.status==='pending');
+  if (idx>=0) f.approvals[idx]={...f.approvals[idx],status:decision,name:who,time:now(),comment};
+  const allOk=f.approvals.every(a=>a.status==='approved');
+  const hasRej=f.approvals.some(a=>a.status==='rejected');
+  if (hasRej) { f.status='rejected'; f.history=[...(f.history||[]),{ver:'v'+(f.ver||1),who,time:now(),reason:comment||'退回',changes:[{field:'狀態',old:'審核中',new:'已退回'}]}]; }
+  else if (allOk) { f.status='approved'; f.history=[...(f.history||[]),{ver:'v'+(f.ver||1),who,time:now(),reason:'全部核准',changes:[{field:'狀態',old:'審核中',new:'已核准'}]}]; }
+  else { const nx=f.approvals.find(a=>a.status==='waiting'); if(nx) nx.status='pending'; }
+  await Cloud.saveForm(f); S.forms=await Cloud.getForms();
+  toast(decision==='approved'?'✓ 已核准':'✗ 已退回'); goForm(id);
+}
+
+async function addField(deptId) {
+  const dept=S.depts.find(d=>d.id===deptId); if(!dept) return;
+  dept.fields=[...(dept.fields||[]),{id:'f'+Date.now(),label:'新欄位',type:'text',required:false}];
+  await Cloud.saveDepts(S.depts); toast('欄位已新增'); render();
+}
+async function delField(deptId,fid) {
+  if(!confirm('確定刪除此欄位？')) return;
+  const dept=S.depts.find(d=>d.id===deptId); if(!dept) return;
+  dept.fields=(dept.fields||[]).filter(f=>f.id!==fid);
+  await Cloud.saveDepts(S.depts); toast('已刪除'); render();
+}
+async function updField(deptId,fid,key,val) {
+  const dept=S.depts.find(d=>d.id===deptId), field=(dept?.fields||[]).find(f=>f.id===fid);
+  if(field) { field[key]=val; await Cloud.saveDepts(S.depts); if(key==='type') render(); }
+}
+async function addFlow(deptId) {
+  S.flows[deptId]=[...(S.flows[deptId]||[]),{role:'審核人',userId:''}];
+  await Cloud.saveFlows(S.flows); toast('已新增'); render();
+}
+async function delFlow(deptId,idx) {
+  S.flows[deptId]=(S.flows[deptId]||[]).filter((_,i)=>i!==idx);
+  await Cloud.saveFlows(S.flows); toast('已刪除'); render();
+}
+async function updFlow(deptId,idx,key,val) {
+  if(S.flows[deptId]?.[idx]) { S.flows[deptId][idx][key]=val; await Cloud.saveFlows(S.flows); }
+}
+async function saveDept() {
+  const name=document.getElementById('m-name')?.value?.trim();
+  const prefix=document.getElementById('m-prefix')?.value?.trim().toUpperCase();
+  const color=document.getElementById('m-color')?.value;
+  if(!name||!prefix) { toast('請填寫部門名稱與前綴代碼'); return; }
+  if(S.depts.find(d=>d.id===prefix)) { toast('前綴代碼已存在'); return; }
+  S.depts.push({id:prefix,name,color,prefix,fields:[{id:'f1',label:'說明',type:'textarea',required:false}]});
+  await Cloud.saveDepts(S.depts);
+  const c=await Cloud.getCounters(); c[prefix]=1; await Cloud.saveCounters(c);
+  S.modal=null; toast(`${name} 已新增`); render();
+}
+
+function pwaBanner() {
+  if(window.matchMedia('(display-mode: standalone)').matches) return;
+  if(Local.get('pwa-dismissed')) return;
+  const main=document.querySelector('.main'); if(!main) return;
+  if(main.querySelector('.pwa-banner')) return;
+  const isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent);
+  const b=document.createElement('div'); b.className='pwa-banner';
+  b.innerHTML=isIOS
+    ?`<span>點 Safari「分享」→「加入主畫面」即可安裝</span><span style="margin-left:auto;cursor:pointer;padding:4px;" onclick="this.parentNode.remove();Local.set('pwa-dismissed',1)">✕</span>`
+    :`<span>可加入主畫面，像 APP 使用（免下載）</span><span style="margin-left:auto;cursor:pointer;padding:4px;" onclick="this.parentNode.remove();Local.set('pwa-dismissed',1)">✕</span>`;
+  main.prepend(b);
+}
+  </script>
+</body>
+</html>
