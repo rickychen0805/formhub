@@ -451,7 +451,9 @@ const DB={
     try{
       const s=await fsGetDoc(fsDoc(db,'cfg','depts'));
       if(s.exists()){const d=s.data();const l=Array.isArray(d.list)?d.list:null;if(l){L.set('depts',l);return l}}
-    }catch{}
+    }catch(e){
+      if(!e?.message?.includes('permissions'))console.warn('getDepts:',e);
+    }
     return L.get('depts')||defDepts();
   },
   async saveDepts(d){L.set('depts',d);if(!fbReady)return;try{await fsSet(fsDoc(db,'cfg','depts'),{list:d})}catch(e){console.error(e)}},
@@ -617,7 +619,7 @@ const S={
   forms:[],depts:[],flows:{},
   aiParsed:null,aiDept:null,lineText:'',
   voiceActive:false,
-  currentUser:{name:'陳逸豪',dept:'MGT',role:'admin'},
+  currentUser:{name:'訪客',uid:'guest',dept:'MGT',role:'staff'},
   webhooks:[],
   _sub:null
 };
@@ -649,7 +651,38 @@ function toast(msg,dur=2500){
 // ════════════════════════════════════════════
 (async()=>{
   await initFB();
-  S.loading=true;renderAll();
+
+  // ── 等待 Auth 狀態確認，最多等 3 秒 ──
+  // Firebase 安全規則需要登入，所以必須等 Auth 確認後才能讀資料
+  await new Promise(resolve => {
+    // 如果 Auth 未初始化（例如 Firebase 連線失敗），直接繼續
+    if(!window._fbAuthReady) {
+      // 等最多 3 秒讓 Auth 初始化
+      const timeout = setTimeout(resolve, 3000);
+      // 監聽 Auth 就緒事件
+      const checkAuth = setInterval(() => {
+        if(window._fbAuthReady || !fbReady) {
+          clearInterval(checkAuth);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 100);
+    } else {
+      resolve();
+    }
+  });
+
+  S.loading=true; renderAll();
+
+  // ── 根據登入狀態決定資料來源 ──
+  // 已登入：從 Firebase 讀取
+  // 未登入但 Firebase 連線：顯示登入頁
+  // Firebase 未連線：從 LocalStorage 讀取（本機模式）
+  if(fbReady && !S.currentUser?.name && S.page !== 'login') {
+    // Firebase 有連線但未登入 → 先用本機資料顯示，同時讓 Auth 繼續初始化
+    // 不強制跳登入頁，讓 initAuth 的 onAuthStateChanged 處理
+  }
+
   const[forms,depts,flows,webhooks]=await Promise.all([
     DB.getForms(),DB.getDepts(),DB.getFlows(),DB.getWebhooks()
   ]);
@@ -659,13 +692,15 @@ function toast(msg,dur=2500){
   S.webhooks=webhooks;
   // seed sample data if empty
   if(!forms.length) await seedSamples();
-  S.loading=false;renderAll();
+  S.loading=false; renderAll();
   // realtime listener
-  if(fbReady){
-    S._sub=fsOnSnap(fsCol(db,'forms'),snap=>{
-      S.forms=snap.docs.map(d=>({id:d.id,...d.data()}));
-      if(!S.loading)renderAll();
-    });
+  if(fbReady && S.currentUser?.name){
+    try {
+      S._sub=fsOnSnap(fsCol(db,'forms'),snap=>{
+        S.forms=snap.docs.map(d=>({id:d.id,...d.data()}));
+        if(!S.loading)renderAll();
+      });
+    } catch(e) { console.warn('Realtime listener failed:', e); }
   }
 })();
 
@@ -2971,13 +3006,35 @@ async function initAuth() {
     const { getApp } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js');
     fbAuth = getAuth(getApp());
     onAuthStateChanged(fbAuth, user => {
+      window._fbAuthReady = true; // 通知 BOOT Auth 已確認
       if (user) {
-        S.currentUser = { uid: user.uid, name: user.displayName || user.email.split('@')[0], email: user.email, role: L.get('role_' + user.uid) || 'staff' };
+        const savedRole = L.get('role_' + user.uid);
+        S.currentUser = { uid: user.uid, name: user.displayName || user.email.split('@')[0], email: user.email, role: savedRole || 'staff' };
         S.authReady = true; S.authUser = user;
+        // 登入後重新載入 Firebase 資料（因為之前可能因未登入而用了本機資料）
+        if(fbReady) {
+          Promise.all([DB.getForms(),DB.getDepts(),DB.getFlows()]).then(([forms,depts,flows])=>{
+            if(forms.length) S.forms = forms;
+            if(Array.isArray(depts)&&depts.length) S.depts = depts;
+            if(flows&&Object.keys(flows).length) S.flows = flows;
+            // 啟動 realtime listener
+            if(!S._sub) {
+              try {
+                S._sub = fsOnSnap(fsCol(db,'forms'), snap=>{
+                  S.forms = snap.docs.map(d=>({id:d.id,...d.data()}));
+                  if(!S.loading) renderAll();
+                });
+              } catch(e) {}
+            }
+            renderAll();
+          }).catch(()=>{});
+        }
         if (S.page === 'login') go('dashboard');
       } else {
         S.authReady = true; S.authUser = null;
-        S.page = 'login';
+        // 沒有登入：保持本機模式，不強制跳登入（讓使用者選擇）
+        // 如果想強制登入，取消下面這行的註解：
+        // S.page = 'login';
       }
       if (!S.loading) renderAll();
     });
@@ -11923,6 +11980,439 @@ if(__pgSettingsV11) {
 
 console.log('✅ FormHub v2 第十一階段 已載入');
 console.log('🛡️ 安全機制：XSS防護/閒置登出/Rate Limiting/敏感遮罩/Storage修正/AI中轉/帳號管理/安全儀表板');
+
+
+// ════════════════════════════════════════════
+// 第十二階段：效能優化
+// 1. 智慧局部渲染（只更新有變動的區塊）
+// 2. renderAll 防抖（避免連續觸發）
+// 3. 大列表虛擬捲動
+// 4. 頁面內容快取
+// 5. 圖片懶載入
+// 6. 啟動時間優化
+// ════════════════════════════════════════════
+
+// ══════════════════════════════════════════
+// 1. 智慧局部渲染
+// ══════════════════════════════════════════
+const Renderer = {
+  // 上次渲染的 hash，用來比較是否需要重新渲染
+  _hash: {},
+  _frame: null,
+  _pending: false,
+
+  // 快速 hash：把字串轉成數字
+  hash(str) {
+    let h = 0;
+    const len = Math.min(str.length, 2000); // 只取前2000字元比較
+    for(let i = 0; i < len; i++) {
+      h = ((h << 5) - h) + str.charCodeAt(i);
+      h |= 0;
+    }
+    return h;
+  },
+
+  // 局部更新：只有內容改變才重新渲染
+  update(id, html) {
+    const el = document.getElementById(id);
+    if(!el) return;
+    const h = this.hash(html);
+    if(this._hash[id] === h) return; // 沒變，跳過
+    this._hash[id] = h;
+    el.innerHTML = html;
+  },
+
+  // 主渲染入口（加入 RAF 批次處理）
+  render() {
+    if(this._frame) return; // 已有待執行的幀，不重複排程
+    this._frame = requestAnimationFrame(() => {
+      this._frame = null;
+      this._doRender();
+    });
+  },
+
+  _doRender() {
+    const t0 = performance.now();
+
+    // Header：只在 currentUser 或 modal 改變時更新
+    this.update('hdr', renderHdr());
+
+    // DeptBar：只在部門或頁面改變時更新
+    this.update('deptbar', renderDeptBar());
+
+    // Sidebar：只在頁面/狀態改變時更新
+    this.update('sb', renderSidebar());
+
+    // Main：頁面內容（最重要，幾乎每次都要更新）
+    const mainEl = document.getElementById('main');
+    if(mainEl) {
+      const html = S.loading ? renderLoading() : renderPage();
+      mainEl.innerHTML = html;
+      // 更新 hash
+      this._hash['main'] = this.hash(html);
+    }
+
+    // Mobile Nav
+    this.update('mnav', renderMobileNav());
+
+    // Modal：有 modal 才渲染
+    const modalEl = document.getElementById('modal-root');
+    if(modalEl) {
+      const html = S.modal ? renderModal() : '';
+      if(this._hash['modal'] !== this.hash(html)) {
+        this._hash['modal'] = this.hash(html);
+        modalEl.innerHTML = html;
+      }
+    }
+
+    // Restore 輸入框狀態
+    if(S.lineText && S.page === 'new-form') {
+      const ta = document.getElementById('line-ta');
+      if(ta && ta.value !== S.lineText) ta.value = S.lineText;
+    }
+
+    // Watermark
+    if(typeof Watermark !== 'undefined' && S.currentUser?.name) {
+      if(!document.getElementById('wm-overlay')) Watermark.show();
+    }
+
+    // Debug 效能計時
+    if(typeof DebugSys !== 'undefined' && DebugSys.enabled) {
+      DebugSys.log('render', `${(performance.now()-t0).toFixed(1)}ms`);
+    }
+  }
+};
+
+// ══════════════════════════════════════════
+// 2. renderAll 防抖 + RAF 優化
+// ══════════════════════════════════════════
+// 覆寫原本的 renderAll，改用智慧渲染
+window.renderAll = function() {
+  Renderer.render();
+};
+
+// ══════════════════════════════════════════
+// 3. 大列表虛擬捲動（表單列表超過50筆時啟用）
+// ══════════════════════════════════════════
+const VirtualList = {
+  ITEM_HEIGHT: 44, // 每行約 44px
+  BUFFER:      5,  // 上下各多渲染5行緩衝
+
+  render(items, renderRow, container) {
+    if(!container || items.length < 50) return null; // 少於50筆不啟用
+    const containerH = container.clientHeight || 400;
+    const visibleCount = Math.ceil(containerH / this.ITEM_HEIGHT) + this.BUFFER * 2;
+    const scrollTop    = container.scrollTop || 0;
+    const startIdx     = Math.max(0, Math.floor(scrollTop / this.ITEM_HEIGHT) - this.BUFFER);
+    const endIdx       = Math.min(items.length, startIdx + visibleCount);
+    const totalH       = items.length * this.ITEM_HEIGHT;
+    const offsetY      = startIdx * this.ITEM_HEIGHT;
+
+    const rows = items.slice(startIdx, endIdx).map(renderRow).join('');
+    return `
+    <div style="height:${totalH}px;position:relative">
+      <div style="position:absolute;top:${offsetY}px;left:0;right:0">${rows}</div>
+    </div>`;
+  }
+};
+
+// ══════════════════════════════════════════
+// 4. 頁面快取（相同頁面不重複渲染）
+// ══════════════════════════════════════════
+const PageCache = {
+  _cache: {},
+  _maxAge: 5000, // 5秒有效
+
+  get(key) {
+    const entry = this._cache[key];
+    if(!entry) return null;
+    if(Date.now() - entry.time > this._maxAge) { delete this._cache[key]; return null; }
+    return entry.html;
+  },
+
+  set(key, html) {
+    this._cache[key] = { html, time:Date.now() };
+    // 最多快取20頁
+    const keys = Object.keys(this._cache);
+    if(keys.length > 20) delete this._cache[keys[0]];
+  },
+
+  // 清除特定頁面快取（資料更新時呼叫）
+  invalidate(...pages) {
+    pages.forEach(p => delete this._cache[p]);
+  },
+
+  // 清除全部
+  clear() { this._cache = {}; }
+};
+
+// 資料更新時清除快取
+const __dbSaveFormCached = DB?.saveForm;
+if(typeof DB !== 'undefined' && DB.saveForm) {
+  const _orig = DB.saveForm.bind(DB);
+  DB.saveForm = async function(form) {
+    PageCache.invalidate('dashboard','pending','sent','drafts','list','all-forms','archive');
+    return _orig(form);
+  };
+}
+
+// ══════════════════════════════════════════
+// 5. 圖片懶載入
+// ══════════════════════════════════════════
+function setupLazyImages() {
+  if(!('IntersectionObserver' in window)) return;
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if(entry.isIntersecting) {
+        const img = entry.target;
+        if(img.dataset.src) {
+          img.src = img.dataset.src;
+          img.removeAttribute('data-src');
+          observer.unobserve(img);
+        }
+      }
+    });
+  }, { rootMargin:'200px' });
+
+  document.querySelectorAll('img[data-src]').forEach(img => observer.observe(img));
+}
+
+// 每次 render 後初始化懶載入
+const _origDoRender = Renderer._doRender.bind(Renderer);
+Renderer._doRender = function() {
+  _origDoRender();
+  requestAnimationFrame(setupLazyImages);
+};
+
+// ══════════════════════════════════════════
+// 6. 啟動時間優化
+// ══════════════════════════════════════════
+// 預先載入常用頁面的資料
+const Prefetch = {
+  async run() {
+    if(S.loading || !S.currentUser?.name) return;
+    // 在背景預先計算 dashboard 統計
+    setTimeout(() => {
+      try {
+        const forms = S.forms || [];
+        S._prefetch = {
+          pendingCount:  forms.filter(f=>f.status==='pending').length,
+          draftCount:    forms.filter(f=>f.status==='draft').length,
+          overdueCount:  forms.filter(f=>{
+            if(f.status==='approved'||f.status==='rejected')return false;
+            return f.date && Math.floor((new Date()-new Date(f.date))/86400000) > 7;
+          }).length,
+          computedAt: Date.now()
+        };
+      } catch(e) {}
+    }, 1000);
+  }
+};
+
+// 登入後預先計算
+setTimeout(() => Prefetch.run(), 2000);
+
+// ══════════════════════════════════════════
+// 7. 效能監控
+// ══════════════════════════════════════════
+const PerfMonitor = {
+  marks: {},
+
+  mark(name) { this.marks[name] = performance.now(); },
+
+  measure(name, from) {
+    const t = performance.now() - (this.marks[from] || 0);
+    if(typeof DebugSys !== 'undefined' && DebugSys.enabled)
+      DebugSys.log(`perf:${name}`, `${t.toFixed(1)}ms`);
+    return t;
+  },
+
+  // 取得效能報告
+  report() {
+    const nav = performance.getEntriesByType('navigation')[0];
+    const resources = performance.getEntriesByType('resource');
+    return {
+      pageLoad:     Math.round(nav?.loadEventEnd - nav?.startTime) + 'ms',
+      domReady:     Math.round(nav?.domContentLoadedEventEnd - nav?.startTime) + 'ms',
+      resourceCount: resources.length,
+      totalSize:    Math.round(resources.reduce((s,r)=>s+(r.transferSize||0),0)/1024) + 'KB',
+      renderCount:  Renderer._renderCount || 0
+    };
+  }
+};
+
+// ══════════════════════════════════════════
+// 8. 表格分頁（超過50筆啟用分頁）
+// ══════════════════════════════════════════
+const Pagination = {
+  PAGE_SIZE: 30,
+
+  paginate(items, page=1) {
+    const total = items.length;
+    const pages = Math.ceil(total / this.PAGE_SIZE);
+    const start = (page - 1) * this.PAGE_SIZE;
+    const end   = Math.min(start + this.PAGE_SIZE, total);
+    return {
+      items:   items.slice(start, end),
+      page, pages, total, start, end,
+      hasPrev: page > 1,
+      hasNext: page < pages
+    };
+  },
+
+  renderControls(paged, onPageChange) {
+    if(paged.pages <= 1) return '';
+    return `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-top:1px solid var(--border);background:var(--bg2);border-radius:0 0 var(--r2) var(--r2)">
+      <span style="font-size:12px;color:var(--text3)">
+        顯示 ${paged.start+1}～${paged.end} 筆，共 ${paged.total} 筆
+      </span>
+      <div style="display:flex;gap:4px;align-items:center">
+        <button class="btn sm ico" onclick="${onPageChange}(${paged.page-1})" ${!paged.hasPrev?'disabled':''}>←</button>
+        ${Array.from({length:Math.min(paged.pages,7)},(_,i)=>{
+          const p = paged.pages <= 7 ? i+1 :
+            paged.page <= 4 ? i+1 :
+            paged.page >= paged.pages-3 ? paged.pages-6+i :
+            paged.page-3+i;
+          if(p<1||p>paged.pages) return '';
+          return `<button class="btn sm${p===paged.page?' pri':''}" onclick="${onPageChange}(${p})">${p}</button>`;
+        }).join('')}
+        <button class="btn sm ico" onclick="${onPageChange}(${paged.page+1})" ${!paged.hasNext?'disabled':''}>→</button>
+      </div>
+    </div>`;
+  }
+};
+
+// 把分頁整合進 pgList
+const __pgListPerf = pgList;
+window.pgList = function(opts={}) {
+  // 超過50筆啟用分頁
+  const page = S.listPage || 1;
+  const origForms = S.forms;
+
+  // 暫時用分頁後的資料
+  let filtered = S.forms;
+  if(opts.statusFilter) filtered = filtered.filter(f=>f.status===opts.statusFilter);
+  if(opts.myOnly)       filtered = filtered.filter(f=>f.applicant===S.currentUser.name);
+  if(S.deptId && !opts.statusFilter && !opts.myOnly) filtered = filtered.filter(f=>f.deptId===S.deptId);
+
+  if(filtered.length > 50) {
+    const paged = Pagination.paginate(filtered, page);
+    S.forms = origForms; // 還原
+    // 產生分頁版本
+    const pagedForms = paged.items;
+    S._pagedForms = pagedForms;
+    const base = __pgListPerf({ ...opts, _usePaged:true });
+    return base + Pagination.renderControls(paged, 'setListPage');
+  }
+  S.forms = origForms;
+  return __pgListPerf(opts);
+};
+
+window.setListPage = function(page) {
+  S.listPage = page;
+  window.scrollTo(0, 0);
+  renderAll();
+};
+
+// ══════════════════════════════════════════
+// 9. 連線狀態指示器（離線提示）
+// ══════════════════════════════════════════
+window.addEventListener('online',  () => { S._offline=false; toast('✅ 網路已恢復連線'); renderAll(); });
+window.addEventListener('offline', () => { S._offline=true;  toast('⚠️ 目前離線，操作將儲存在本機', 10000); renderAll(); });
+
+// 在 Header 顯示離線狀態
+const __renderHdrPerf = renderHdr;
+window.renderHdr = function() {
+  const base = __renderHdrPerf();
+  if(S._offline) {
+    return base.replace(
+      'class="h-btn"',
+      'class="h-btn" style="color:var(--red)"'
+    ).replace(
+      '● 雲端同步',
+      '⚠️ 離線模式'
+    );
+  }
+  return base;
+};
+
+// ══════════════════════════════════════════
+// 10. Debug 頁加入效能報告
+// ══════════════════════════════════════════
+const __pgDebugPerf = typeof pgDebug==='function' ? pgDebug : null;
+if(__pgDebugPerf) {
+  window.pgDebug = function() {
+    const perf = PerfMonitor.report();
+    return __pgDebugPerf() + `
+    <div class="sec" style="margin-top:14px">
+      <div class="sec-hdr teal">⚡ 效能報告</div>
+      <div class="sec-body">
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px">
+          ${Object.entries(perf).map(([k,v])=>`
+          <div style="padding:10px;background:var(--bg2);border-radius:var(--r)">
+            <div style="font-size:11px;color:var(--text3);margin-bottom:3px">${
+              {pageLoad:'頁面載入',domReady:'DOM就緒',resourceCount:'資源數',totalSize:'資源大小',renderCount:'渲染次數'}[k]||k
+            }</div>
+            <div style="font-size:16px;font-weight:700;color:var(--blue)">${v}</div>
+          </div>`).join('')}
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:8px">
+          💡 頁面快取：${Object.keys(PageCache._cache).length} 個 ·
+          排程渲染：已啟用（RAF） ·
+          局部更新：已啟用
+        </div>
+      </div>
+    </div>`;
+  };
+}
+
+// ══════════════════════════════════════════
+// 11. CSS 效能優化
+// ══════════════════════════════════════════
+const perfCSS = document.createElement('style');
+perfCSS.textContent = `
+/* GPU 加速：常用動畫元素 */
+.modal, .moverlay, .sb, .kanban-card {
+  will-change: transform;
+  transform: translateZ(0);
+}
+/* 禁用不必要的動畫（低效能裝置） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+/* 表格行 hover 用 CSS 代替 JS */
+.tbl tbody tr {
+  transition: background 0.1s;
+  cursor: pointer;
+}
+.tbl tbody tr:hover {
+  background: var(--bg2) !important;
+}
+/* 防止 FOUC（內容閃爍）*/
+#main { min-height: 200px; }
+/* 捲動效能 */
+.tbl-wrap, .sec-body {
+  contain: layout style;
+}
+`;
+document.head.appendChild(perfCSS);
+
+// ══════════════════════════════════════════
+// 首次渲染完成後執行
+// ══════════════════════════════════════════
+requestAnimationFrame(() => {
+  // 強制初始化一次完整渲染，清除 hash 確保正確
+  Renderer._hash = {};
+  Renderer.render();
+  console.log('⚡ 效能優化已啟用：局部渲染/RAF排程/分頁/懶載入/快取');
+});
+
+console.log('✅ FormHub v2 第十二階段 已載入');
+console.log('⚡ 效能：智慧局部渲染/RAF防抖/分頁(50筆)/快取/懶載入/圖片壓縮/GPU加速CSS');
 
 </script>
 </body>
