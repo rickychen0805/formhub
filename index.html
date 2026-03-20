@@ -651,37 +651,11 @@ function toast(msg,dur=2500){
 // ════════════════════════════════════════════
 (async()=>{
   await initFB();
+  // initAuth 在 initFB 之前已被呼叫（非同步在背景執行）
+  // BOOT 直接用本機資料啟動，不等待 Auth
+  // Auth 就緒後 onAuthStateChanged 會觸發重新渲染
 
-  // ── 等待 Auth 狀態確認，最多等 3 秒 ──
-  // Firebase 安全規則需要登入，所以必須等 Auth 確認後才能讀資料
-  await new Promise(resolve => {
-    // 如果 Auth 未初始化（例如 Firebase 連線失敗），直接繼續
-    if(!window._fbAuthReady) {
-      // 等最多 3 秒讓 Auth 初始化
-      const timeout = setTimeout(resolve, 3000);
-      // 監聽 Auth 就緒事件
-      const checkAuth = setInterval(() => {
-        if(window._fbAuthReady || !fbReady) {
-          clearInterval(checkAuth);
-          clearTimeout(timeout);
-          resolve();
-        }
-      }, 100);
-    } else {
-      resolve();
-    }
-  });
-
-  S.loading=true; renderAll();
-
-  // ── 根據登入狀態決定資料來源 ──
-  // 已登入：從 Firebase 讀取
-  // 未登入但 Firebase 連線：顯示登入頁
-  // Firebase 未連線：從 LocalStorage 讀取（本機模式）
-  if(fbReady && !S.currentUser?.name && S.page !== 'login') {
-    // Firebase 有連線但未登入 → 先用本機資料顯示，同時讓 Auth 繼續初始化
-    // 不強制跳登入頁，讓 initAuth 的 onAuthStateChanged 處理
-  }
+  S.loading=true; renderAll(true);
 
   const[forms,depts,flows,webhooks]=await Promise.all([
     DB.getForms(),DB.getDepts(),DB.getFlows(),DB.getWebhooks()
@@ -692,15 +666,18 @@ function toast(msg,dur=2500){
   S.webhooks=webhooks;
   // seed sample data if empty
   if(!forms.length) await seedSamples();
-  S.loading=false; renderAll();
-  // realtime listener
-  if(fbReady && S.currentUser?.name){
+  S.loading=false; renderAll(true); // 強制完整渲染
+  // realtime listener - 只有登入後才啟動
+  // 未登入時由 initAuth 的 onAuthStateChanged 啟動
+  if(fbReady && S.currentUser?.uid && S.currentUser.uid !== 'guest'){
     try {
       S._sub=fsOnSnap(fsCol(db,'forms'),snap=>{
         S.forms=snap.docs.map(d=>({id:d.id,...d.data()}));
         if(!S.loading)renderAll();
       });
-    } catch(e) { console.warn('Realtime listener failed:', e); }
+    } catch(e) {
+      if(!e?.message?.includes('permissions')) console.warn('Realtime listener failed:', e);
+    }
   }
 })();
 
@@ -742,7 +719,7 @@ async function seedSamples(){
 // ════════════════════════════════════════════
 // RENDER ENGINE
 // ════════════════════════════════════════════
-function renderAll(){
+function _old_renderAll_1(){
   document.getElementById('hdr').innerHTML=renderHdr();
   document.getElementById('deptbar').innerHTML=renderDeptBar();
   document.getElementById('sb').innerHTML=renderSidebar();
@@ -756,7 +733,7 @@ function renderAll(){
   }
 }
 
-function renderHdr(){
+function _old_renderHdr_x(){
   const sync=fbReady
     ?'<span class="sync-badge sync-cloud">● 雲端同步</span>'
     :'<span class="sync-badge sync-local">○ 本機模式</span>';
@@ -784,7 +761,7 @@ function renderDeptBar(){
   }).join('');
 }
 
-function renderSidebar(){
+function _renderSidebarOld1(){
   const p=myPending().length,dr=myDraft().length,ov=overdue().length;
   return`
     <div class="sb-sec">
@@ -820,7 +797,7 @@ function renderSidebar(){
     </div>`;
 }
 
-function renderMobileNav(){
+function _old_renderMobileNav_x(){
   return`
     <div class="mn-item${S.page==='dashboard'?' on':''}" onclick="go('dashboard')"><span class="mn-ic">🏠</span>首頁</div>
     <div class="mn-item${S.page==='list'||S.page==='pending'?' on':''}" onclick="goSb('pending')"><span class="mn-ic">📥</span>待審</div>
@@ -838,22 +815,56 @@ function renderLoading(){
 
 function renderPage(){
   switch(S.page){
-    case 'dashboard':   return pgDashboard();
-    case 'list':        return pgList();
-    case 'pending':     return pgList({statusFilter:'pending',title:'等待我處理'});
-    case 'sent':        return pgList({myOnly:true,title:'我送出的簽核'});
-    case 'drafts':      return pgList({statusFilter:'draft',myOnly:true,title:'草稿匣'});
-    case 'approved-list':return pgList({statusFilter:'approved',title:'簽核記錄'});
-    case 'archive':     return pgList({statusFilter:'approved',title:'歸檔匣'});
-    case 'all-forms':   return pgList({title:'系統所有進行中文件'});
-    case 'overdue':     return pgList({overdue:true,title:'逾期統計'});
-    case 'view':        return pgView();
-    case 'new-form':    return pgNew();
-    case 'edit-form':   return pgEdit();
-    case 'approve':     return pgApprove();
-    case 'settings':    return pgSettings();
-    case 'api-mgr':     return pgApiMgr();
-    default:            return pgDashboard();
+    case 'dashboard':      return pgDashboard();
+    case 'list':           return pgList();
+    case 'pending':        return pgList({statusFilter:'pending',title:'等待我處理'});
+    case 'sent':           return pgList({myOnly:true,title:'我送出的簽核'});
+    case 'drafts':         return pgList({statusFilter:'draft',myOnly:true,title:'草稿匣'});
+    case 'approved-list':  return pgList({statusFilter:'approved',title:'簽核記錄'});
+    case 'archive':        return pgList({statusFilter:'approved',title:'歸檔匣'});
+    case 'all-forms':      return pgList({title:'系統所有進行中文件'});
+    case 'overdue':        return pgList({overdue:true,title:'逾期統計'});
+    case 'view':           return pgView();
+    case 'new-form':       return pgNew();
+    case 'edit-form':      return pgEdit();
+    case 'approve':        return pgApprove();
+    case 'settings':       return typeof pgSettings==='function'?pgSettings():pgDashboard();
+    case 'api-mgr':        return typeof pgApiMgr==='function'?pgApiMgr():pgDashboard();
+    case 'integ-settings': return typeof pgIntegSettings==='function'?pgIntegSettings():pgDashboard();
+    case 'file-import':    return typeof pgFileImport==='function'?pgFileImport():pgDashboard();
+    case '8d':             return typeof pg8D==='function'?pg8D():pgDashboard();
+    case 'crm':            return typeof pgCRM==='function'?pgCRM():pgDashboard();
+    case 'mail-mgr':       return typeof pgMailMgr==='function'?pgMailMgr():pgDashboard();
+    case 'kanban':         return typeof pgKanban==='function'?pgKanban(S.deptId):pgDashboard();
+    case 'gantt':          return typeof pgGantt==='function'?pgGantt(S.deptId):pgDashboard();
+    case 'personal-cal':   return typeof pgPersonalCalendar==='function'?pgPersonalCalendar():pgDashboard();
+    case 'mindmap':        return typeof pgMindMap==='function'?pgMindMap(S.mindMapId):pgDashboard();
+    case 'mindmap-list':   return typeof pgMindMap==='function'?pgMindMap(null):pgDashboard();
+    case 'vendors':        return typeof pgVendorMgr==='function'?pgVendorMgr():pgDashboard();
+    case 'wiki':           return typeof pgWiki==='function'?pgWiki():pgDashboard();
+    case 'iso':            return typeof pgISO==='function'?pgISO():pgDashboard();
+    case 'iso-detail':     return typeof pgISODetail==='function'?pgISODetail():pgDashboard();
+    case 'mes':            return typeof pgMES==='function'?pgMES():pgDashboard();
+    case 'mes-order':      return typeof pgMESOrder==='function'?pgMESOrder():pgDashboard();
+    case 'sales-funnel':   return typeof pgSalesFunnel==='function'?pgSalesFunnel():pgDashboard();
+    case 'prospects':      return typeof pgProspects==='function'?pgProspects():pgDashboard();
+    case 'product-dev':    return typeof pgProductDev==='function'?pgProductDev():pgDashboard();
+    case 'social':         return typeof pgSocialMedia==='function'?pgSocialMedia():pgDashboard();
+    case 'competitors':    return typeof pgCompetitors==='function'?pgCompetitors():pgDashboard();
+    case 'newsletter':     return typeof pgNewsletter==='function'?pgNewsletter():pgDashboard();
+    case 'newsletter-view':return typeof pgNewsletterView==='function'?pgNewsletterView():pgDashboard();
+    case 'lunch':          return typeof pgLunch==='function'?pgLunch():pgDashboard();
+    case 'vote':           return typeof pgVote==='function'?pgVote():pgDashboard();
+    case 'email-tracker':  return typeof pgEmailTracker==='function'?pgEmailTracker():pgDashboard();
+    case 'notifications':  return typeof pgNotifications==='function'?pgNotifications():pgDashboard();
+    case 'dashboard-charts':return typeof pgDashboardCharts==='function'?pgDashboardCharts():pgDashboard();
+    case 'templates':      return typeof pgTemplates==='function'?pgTemplates():pgDashboard();
+    case 'sensitive-approvals':return typeof pgSensitiveApprovals==='function'?pgSensitiveApprovals():pgDashboard();
+    case 'security-dashboard':return typeof pgSecurityDashboard==='function'?pgSecurityDashboard():pgDashboard();
+    case 'user-mgr':       return typeof pgUserMgr==='function'?pgUserMgr():pgDashboard();
+    case 'debug':          return typeof pgDebug==='function'?pgDebug():pgDashboard();
+    case 'audit-log':      return typeof pgAuditLog==='function'?pgAuditLog():pgDashboard();
+    default:               return pgDashboard();
   }
 }
 
@@ -861,7 +872,7 @@ function renderPage(){
 // PAGES
 // ════════════════════════════════════════════
 
-function pgDashboard(){
+function _old_pgDashboard_x(){
   const f=S.forms,pend=myPending(),dr=myDraft(),ov=overdue();
   const recent=[...f].sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,8);
   const deptStats=S.depts.map(d=>({...d,cnt:f.filter(x=>x.deptId===d.id).length,pend:f.filter(x=>x.deptId===d.id&&x.status==='pending').length}));
@@ -945,7 +956,7 @@ function pgDashboard(){
   </div>`;
 }
 
-function pgList(opts={}){
+function _old_pgList_x(opts={}){
   let forms=S.forms;
   const title=opts.title||(S.deptId?deptOf(S.deptId).name+'表單':'全部表單');
   if(S.deptId&&!opts.statusFilter)forms=forms.filter(f=>f.deptId===S.deptId);
@@ -1006,7 +1017,7 @@ function pgList(opts={}){
   </div>`}`;
 }
 
-function pgView(){
+function _old_pgView_x(){
   const f=S.forms.find(x=>x.id===S.formId);
   if(!f)return`<div class="empty">找不到表單</div>`;
   const dept=deptOf(f.deptId);
@@ -1261,7 +1272,7 @@ function pgNew(){
   </div>`;
 }
 
-function pgEdit(){
+function _old_pgEdit_x(){
   const f=S.forms.find(x=>x.id===S.formId);if(!f)return'';
   const dept=deptOf(f.deptId);
   return`
@@ -1375,7 +1386,7 @@ function pgApprove(){
   </div>`;
 }
 
-function pgSettings(){
+function _old_pgSettings_x(){
   return`
   <div class="pg-hdr">
     <div class="pg-title">⚙️ 表單與部門設定</div>
@@ -1496,7 +1507,7 @@ function pgApiMgr(){
 // ════════════════════════════════════════════
 // MODAL
 // ════════════════════════════════════════════
-function renderModal(){
+function _old_renderModal_x(){
   if(S.modal==='add-dept') return`
     <div class="moverlay" onclick="if(event.target===this){S.modal=null;renderAll()}">
       <div class="modal">
@@ -1606,7 +1617,7 @@ function goSb(p){S.page=p;S.deptId=null;window.scrollTo(0,0);renderAll()}
 function goView(id){S.formId=id;S.page='view';window.scrollTo(0,0);renderAll()}
 function goEdit(id){S.formId=id;S.page='edit-form';window.scrollTo(0,0);renderAll()}
 function goApprove(id){S.formId=id;S.page='approve';window.scrollTo(0,0);renderAll()}
-function toggleSb(){S.sidebarOpen=!S.sidebarOpen;const sb=document.getElementById('sb');if(sb){sb.style.display=S.sidebarOpen?'block':'';}}
+function _old_toggleSb_x(){S.sidebarOpen=!S.sidebarOpen;const sb=document.getElementById('sb');if(sb){sb.style.display=S.sidebarOpen?'block':'';}}
 function showQR(id){S.modal='qr:'+id;renderAll();setTimeout(()=>drawQR(id),50)}
 
 // ════════════════════════════════════════════
@@ -1653,7 +1664,7 @@ function collectRows(){
 // PHOTO UPLOAD
 // ════════════════════════════════════════════
 const photoBuf=[];
-async function handlePhotoUpload(inp){
+async function _old_handlePhotoUpload_x(inp){
   for(const file of inp.files){
     const url=await fileToDataURL(file);
     photoBuf.push(url);
@@ -1764,7 +1775,7 @@ JSON格式：
 // ════════════════════════════════════════════
 // ASYNC ACTIONS
 // ════════════════════════════════════════════
-async function doSave(status){
+async function _old_doSave_x(status){
   const deptId=document.getElementById('sel-dept')?.value;
   const formType=document.getElementById('sel-type')?.value;
   const applicant=document.getElementById('inp-applicant')?.value?.trim();
@@ -1796,7 +1807,7 @@ async function doSave(status){
   }catch(e){console.error(e);toast('儲存失敗：'+e.message)}
 }
 
-async function doEdit(id){
+async function _old_doEdit_x(id){
   const who=document.getElementById('ed-who')?.value?.trim();
   const reason=document.getElementById('ed-reason')?.value?.trim();
   if(!who||!reason){toast('請填寫修改人與修改原因');return}
@@ -1830,7 +1841,7 @@ async function doSubmit(id){
   toast('✓ 已送出審核');goView(id);
 }
 
-async function doApprove(id){
+async function _old_doApprove_x(id){
   const who=document.getElementById('ap-who')?.value?.trim();
   const dec=document.getElementById('ap-dec')?.value;
   const comment=document.getElementById('ap-comment')?.value?.trim();
@@ -1858,7 +1869,7 @@ async function doApprove(id){
 // ════════════════════════════════════════════
 // WEBHOOK TRIGGER
 // ════════════════════════════════════════════
-async function triggerWebhooks(event,form){
+async function _old_triggerWebhooks_x(event,form){
   const hooks=(S.webhooks||[]).filter(w=>w.trigger===event&&(w.deptId==='all'||w.deptId===form.deptId));
   if(!hooks.length)return;
   const payload={event,seq:form.seq,formType:form.formType,dept:deptOf(form.deptId).name,applicant:form.applicant,status:form.status,fields:form.fields,items:form.items,timestamp:now()};
@@ -2355,7 +2366,7 @@ const _origRenderPage=renderPage;
 window.renderPage=renderPage;
 // patch page routing for new pages
 const _renderPageOrig=window.renderPage||renderPage;
-function renderPageExtended(){
+function _old_renderPageExtended_x(){
   switch(S.page){
     case 'crm':         return pgCRM();
     case '8d':          return pg8D(S.formId);
@@ -2366,7 +2377,7 @@ function renderPageExtended(){
 
 // Override renderAll to use extended router
 const _renderAllBase=renderAll;
-function renderAll(){
+function _old_renderAll_2(){
   const isMob=window.innerWidth<=768;
   document.getElementById('hdr').innerHTML=renderHdr();
   document.getElementById('deptbar').innerHTML=renderDeptBar();
@@ -2399,7 +2410,7 @@ function renderAll(){
 // SIDEBAR EXTENDED — add CRM, 8D, File Import
 // ════════════════════════════════════════════
 const _renderSidebarBase=renderSidebar;
-function renderSidebar(){
+function _renderSidebarOld2(){
   const p=myPending().length,dr=myDraft().length,ov=overdue().length;
   return`
     <div class="sb-sec">
@@ -2902,8 +2913,7 @@ async function archiveToNAS(formId) {
 }
 
 // ── 覆寫 renderPageExtended 加入新頁面 ──
-const __renderPageExt=renderPageExtended;
-function renderPageExtended(){
+const __renderPageExt=renderPageExtfunction _old_renderPageExtended_x(tended(){
   switch(S.page){
     case 'mail-mgr':       return pgMailMgr();
     case 'integ-settings': return pgIntegSettings();
@@ -2926,8 +2936,7 @@ async function triggerWebhooks(event,form){
 }
 
 // ── 覆寫 pgView 加入 PDF/ERP/NAS 按鈕 ──
-const __pgViewBase=pgView;
-function pgView(){
+const __pgViewBase=pfunction _old_pgView_x(pgView(){
   const f=S.forms.find(x=>x.id===S.formId);
   if(!f)return`<div class="empty">找不到表單</div>`;
   const dept=deptOf(f.deptId);
@@ -2978,8 +2987,7 @@ function pgView(){
 }
 
 // ── 覆寫 pgSettings 加入整合設定入口 ──
-const __pgSettingsBase=pgSettings;
-function pgSettings(){
+const __pgSettingsBase=pgSetfunction _old_pgSettings_x(ttings(){
   return __pgSettingsBase()+`
   <div class="card" style="margin-top:14px;border:1.5px dashed var(--border2)">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
@@ -3036,7 +3044,7 @@ async function initAuth() {
         // 如果想強制登入，取消下面這行的註解：
         // S.page = 'login';
       }
-      if (!S.loading) renderAll();
+      if (!S.loading) renderAll(true); // auth 狀態改變，強制重渲
     });
     window._fbSignIn = (e, p) => signInWithEmailAndPassword(fbAuth, e, p);
     window._fbSignOut = () => signOut(fbAuth);
@@ -3126,7 +3134,7 @@ setTimeout(() => {
 // ════════════════════════════════════════════
 // 登入頁
 // ════════════════════════════════════════════
-function pgLogin() {
+function _old_pgLogin_x() {
   return `
   <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--navy);padding:20px">
     <div style="background:var(--card);border-radius:var(--r3);padding:32px;width:100%;max-width:380px;box-shadow:var(--sh2)">
@@ -3634,7 +3642,7 @@ function pgMindMap(mapId) {
     <button class="btn sm" onclick="mmAutoLayout('${map.id}')">🔄 自動排列</button>
     <div class="txt-xs txt-muted" style="display:flex;align-items:center">💡 點擊節點編輯，雙擊新增子節點，拖拉移動</div>
   </div>
-  <script>setTimeout(()=>initMindMap('${map.id}'),50)<\/script>`;
+  <!-- mindmap will be initialized -->\`;
 }
 
 function createMindMap() {
@@ -4249,8 +4257,7 @@ window.addEventListener('paste', e => {
 // ════════════════════════════════════════════
 // 專案 Modal（新增/查看）
 // ════════════════════════════════════════════
-const _renderModalBase = renderModal;
-function renderModal() {
+const _renderModalBase = renderfunction _old_renderModal_x(rModal() {
   if (S.modal === 'add-reminder') return `
     <div class="moverlay" onclick="if(event.target===this){S.modal=null;renderAll()}">
       <div class="modal">
@@ -4491,8 +4498,7 @@ function saveVendor() {
 // ════════════════════════════════════════════
 // 路由擴充
 // ════════════════════════════════════════════
-const __renderPageExt2 = renderPageExtended;
-function renderPageExtended() {
+const __renderPageExt2 = renderfunction _old_renderPageExtended_x(rPageExtended() {
   // 供應商入口 (外部)
   const params = new URLSearchParams(window.location.search);
   const vtoken = params.get('vendor_token');
@@ -4550,13 +4556,29 @@ function exportAuditLog() {
 // ── Sidebar 最終版（含所有新功能） ──
 function renderSidebar() {
   const p = myPending().length, dr = myDraft().length, ov = overdue().length;
-  const mailDue = Object.values(AutoFollow?.getAll?.()??{}).filter(v=>!v.done&&v.followDate&&v.followDate<=today()).length;
-  const remDue = Reminder.checkDue().length;
+  const mailDue = Object.values(typeof AutoFollow!=='undefined'?AutoFollow?.getAll?.()??{}:{}).filter(v=>!v.done&&v.followDate&&v.followDate<=today()).length;
+  const remDue = typeof Reminder!=='undefined' ? Reminder.checkDue().length : 0;
+  const unread = typeof NotifyDB!=='undefined' ? NotifyDB.unread().length : 0;
+  const sensitivePending = typeof SensitiveApprovalDB!=='undefined' ? SensitiveApprovalDB.pending().length : 0;
+  const socialPending = typeof SocialDB!=='undefined' ? SocialDB.getPosts().filter(p=>p.status==='review').length : 0;
+  const oppAlerts = typeof SalesDB!=='undefined' ? SalesDB.getOpps().filter(o=>{
+    if(o.stage==='won'||o.stage==='lost')return false;
+    return o.lastContactDate?Math.floor((new Date()-new Date(o.lastContactDate))/86400000)>7:true;
+  }).length : 0;
+  const emailOverdue = typeof EmailTracker!=='undefined' ? EmailTracker.getOverdueEmails().length : 0;
+  const emailReview  = typeof EmailTracker!=='undefined' ? EmailTracker.getNeedsReview().length  : 0;
+  const isoExpiring  = typeof ISODB!=='undefined' ? ISODB.getAll().filter(d=>d.reviewDate&&d.reviewDate<=new Date(Date.now()+30*86400000).toISOString().slice(0,10)&&d.status==='approved').length : 0;
+  const mesPending   = typeof MESDB!=='undefined' ? MESDB.getOrders().filter(o=>o.status==='running').length : 0;
+  const secAlerts    = (typeof AuditLog!=='undefined'?AuditLog.getAll():[]).filter(l=>l.action==='security_alert'&&l.time>new Date(Date.now()-86400000).toISOString()).length;
+
   return `
     <div class="sb-sec">
       <div class="sb-lbl">工作匣</div>
+      <div class="sb-item${S.page==='notifications'?' on':''}" onclick="S.page='notifications';S.sidebarOpen=false;renderAll()">
+        <span class="si">🔔</span>通知中心${unread?`<span class="sb-badge">${unread}</span>`:''}
+      </div>
       <div class="sb-item${S.page==='dashboard'?' on':''}" onclick="go('dashboard');S.sidebarOpen=false;renderAll()"><span class="si">🏠</span>我的首頁</div>
-      <div class="sb-item${S.page==='pending'?' on':''}" onclick="goSb('pending');S.sidebarOpen=false;renderAll()"><span class="si">📥</span>等待我處理${p?`<span class="sb-badge">${p}</span>`:'<span class="sb-badge gray">0</span>'}</div>
+      <div class="sb-item${S.page==='pending'?' on':''}" onclick="goSb('pending');S.sidebarOpen=false;renderAll()"><span class="si">📥</span>等待我處理${p?`<span class="sb-badge">${p}</span>`:`<span class="sb-badge gray">0</span>`}</div>
       <div class="sb-item${S.page==='sent'?' on':''}" onclick="goSb('sent');S.sidebarOpen=false;renderAll()"><span class="si">📤</span>我送出的簽核</div>
       <div class="sb-item${S.page==='drafts'?' on':''}" onclick="goSb('drafts');S.sidebarOpen=false;renderAll()"><span class="si">📝</span>草稿匣${dr?`<span class="sb-badge amber">${dr}</span>`:''}</div>
       <div class="sb-item${S.page==='approved-list'?' on':''}" onclick="goSb('approved-list');S.sidebarOpen=false;renderAll()"><span class="si">✅</span>簽核記錄</div>
@@ -4574,7 +4596,43 @@ function renderSidebar() {
     </div>
     <div class="sb-divider"></div>
     <div class="sb-sec">
+      <div class="sb-lbl">業務</div>
+      <div class="sb-item${S.page==='sales-funnel'?' on':''}" onclick="S.page='sales-funnel';S.sidebarOpen=false;renderAll()">
+        <span class="si">🏆</span>業務自動化${oppAlerts?`<span class="sb-badge amber">${oppAlerts}</span>`:''}
+      </div>
+      <div class="sb-item${S.page==='prospects'?' on':''}" onclick="S.page='prospects';S.sidebarOpen=false;renderAll()"><span class="si">📧</span>新客戶開發</div>
+      <div class="sb-item${S.page==='product-dev'?' on':''}" onclick="S.page='product-dev';S.sidebarOpen=false;renderAll()"><span class="si">🚀</span>產品開發流程</div>
+      <div class="sb-item${S.page==='email-tracker'?' on':''}" onclick="S.page='email-tracker';S.sidebarOpen=false;renderAll()">
+        <span class="si">📨</span>Email 追蹤${(emailOverdue+emailReview)>0?`<span class="sb-badge amber">${emailOverdue+emailReview}</span>`:''}
+      </div>
+    </div>
+    <div class="sb-divider"></div>
+    <div class="sb-sec">
+      <div class="sb-lbl">行銷</div>
+      <div class="sb-item${S.page==='social'?' on':''}" onclick="S.page='social';S.sidebarOpen=false;renderAll()">
+        <span class="si">📱</span>社群媒體${socialPending?`<span class="sb-badge amber">${socialPending}</span>`:''}
+      </div>
+      <div class="sb-item${S.page==='newsletter'?' on':''}" onclick="S.page='newsletter';S.sidebarOpen=false;renderAll()"><span class="si">📧</span>電子報系統</div>
+      <div class="sb-item${S.page==='competitors'?' on':''}" onclick="S.page='competitors';S.sidebarOpen=false;renderAll()"><span class="si">🕵️</span>競爭對手分析</div>
+    </div>
+    <div class="sb-divider"></div>
+    <div class="sb-sec">
+      <div class="sb-lbl">知識與文件</div>
+      <div class="sb-item${S.page==='wiki'?' on':''}" onclick="S.page='wiki';S.sidebarOpen=false;renderAll()"><span class="si">📖</span>知識庫</div>
+      <div class="sb-item${S.page==='iso'||S.page==='iso-detail'?' on':''}" onclick="S.page='iso';S.sidebarOpen=false;renderAll()"><span class="si">📋</span>ISO 文件管理</div>
+      <div class="sb-item${S.page==='mes'||S.page==='mes-order'?' on':''}" onclick="S.page='mes';S.sidebarOpen=false;renderAll()"><span class="si">🏭</span>製造管理 MES${mesPending?`<span class="sb-badge amber">${mesPending}</span>`:''}</div>
+    </div>
+    <div class="sb-divider"></div>
+    <div class="sb-sec">
+      <div class="sb-lbl">生活功能</div>
+      <div class="sb-item${S.page==='lunch'?' on':''}" onclick="S.page='lunch';S.sidebarOpen=false;renderAll()"><span class="si">🍱</span>訂便當</div>
+      <div class="sb-item${S.page==='vote'?' on':''}" onclick="S.page='vote';S.sidebarOpen=false;renderAll()"><span class="si">🗳️</span>投票系統</div>
+    </div>
+    <div class="sb-divider"></div>
+    <div class="sb-sec">
       <div class="sb-lbl">功能</div>
+      <div class="sb-item${S.page==='dashboard-charts'?' on':''}" onclick="S.page='dashboard-charts';S.sidebarOpen=false;renderAll()"><span class="si">📊</span>數據圖表</div>
+      <div class="sb-item${S.page==='templates'?' on':''}" onclick="S.page='templates';S.sidebarOpen=false;renderAll()"><span class="si">📋</span>表單範本庫</div>
       <div class="sb-item${S.page==='crm'?' on':''}" onclick="S.page='crm';S.sidebarOpen=false;renderAll()"><span class="si">👥</span>CRM 客戶管理</div>
       <div class="sb-item${S.page==='vendors'?' on':''}" onclick="S.page='vendors';S.sidebarOpen=false;renderAll()"><span class="si">🏭</span>供應商管理</div>
       <div class="sb-item${S.page==='mail-mgr'?' on':''}" onclick="S.page='mail-mgr';S.sidebarOpen=false;renderAll()"><span class="si">📧</span>郵件管理${mailDue?`<span class="sb-badge amber">${mailDue}</span>`:''}</div>
@@ -4593,16 +4651,23 @@ function renderSidebar() {
     <div class="sb-divider"></div>
     <div class="sb-sec">
       <div class="sb-lbl">系統</div>
+      <div class="sb-item${S.page==='sensitive-approvals'?' on':''}" onclick="S.page='sensitive-approvals';S.sidebarOpen=false;renderAll()">
+        <span class="si">⚠️</span>敏感修改審核${sensitivePending?`<span class="sb-badge">${sensitivePending}</span>`:''}
+      </div>
+      <div class="sb-item${S.page==='security-dashboard'?' on':''}" onclick="S.page='security-dashboard';S.sidebarOpen=false;renderAll()">
+        <span class="si">🛡️</span>安全儀表板${secAlerts?`<span class="sb-badge">${secAlerts}</span>`:''}
+      </div>
+      <div class="sb-item${S.page==='user-mgr'?' on':''}" onclick="S.page='user-mgr';S.sidebarOpen=false;renderAll()"><span class="si">👤</span>帳號管理</div>
       <div class="sb-item${S.page==='settings'?' on':''}" onclick="go('settings');S.sidebarOpen=false;renderAll()"><span class="si">⚙️</span>表單設定</div>
       <div class="sb-item${S.page==='integ-settings'?' on':''}" onclick="S.page='integ-settings';S.sidebarOpen=false;renderAll()"><span class="si">🔌</span>整合設定</div>
       <div class="sb-item${S.page==='api-mgr'?' on':''}" onclick="go('api-mgr');S.sidebarOpen=false;renderAll()"><span class="si">🔗</span>API 管理</div>
       <div class="sb-item${S.page==='audit-log'?' on':''}" onclick="S.page='audit-log';S.sidebarOpen=false;renderAll()"><span class="si">📜</span>稽核日誌</div>
+      <div class="sb-item${S.page==='debug'?' on':''}" onclick="S.page='debug';S.sidebarOpen=false;renderAll()"><span class="si">🔍</span>系統診斷</div>
       ${S.currentUser?.name?`<div class="sb-item" onclick="if(window._fbSignOut){window._fbSignOut()}else{S.page='login';S.currentUser={name:'',role:''};renderAll()}"><span class="si">🚪</span>登出 (${S.currentUser.name})</div>`:''}
     </div>`;
 }
 
-// ── 更新行動導覽列 ──
-function renderMobileNav() {
+// ── 更新行動function _old_renderMobileNav_x(ileNav() {
   return `
     <div class="mn-item${S.page==='dashboard'?' on':''}" onclick="go('dashboard')"><span class="mn-ic">🏠</span>首頁</div>
     <div class="mn-item${S.page==='pending'?' on':''}" onclick="goSb('pending')"><span class="mn-ic">📥</span>待審</div>
@@ -4612,8 +4677,7 @@ function renderMobileNav() {
 }
 
 // ── 部門頁面加入看板入口 ──
-const __pgListBase = pgList;
-function pgList(opts = {}) {
+const __pgListBase = pfunction _old_pgList_x(pgList(opts = {}) {
   const base = __pgListBase(opts);
   if (S.deptId && !opts.statusFilter && !opts.myOnly) {
     return base.replace('</div>', `
@@ -4628,14 +4692,12 @@ function pgList(opts = {}) {
 }
 
 // ── 記錄操作到稽核日誌 ──
-const __doSaveBase = doSave;
-async function doSave(status) {
+const __doSaveBase = doSave;function _old_doSave_x(doSave(status) {
   await __doSaveBase(status);
   AuditLog.record(status === 'pending' ? 'submit_form' : 'create_draft', `建立表單 狀態:${status}`, '');
 }
 
-const __doApproveBase = doApprove;
-async function doApprove(id) {
+const __doApproveBase = doApprove;function _old_doApprove_x(pprove(id) {
   await __doApproveBase(id);
   AuditLog.record('approve_form', `審核表單`, id);
 }
@@ -5355,8 +5417,7 @@ function closeVote(sessionId) {
 // ════════════════════════════════════════════
 // Modal 擴充（訂便當/投票/備份）
 // ════════════════════════════════════════════
-const __renderModalPhase4 = renderModal;
-function renderModal() {
+const __renderModalPhase4 =function _old_renderModal_x(n renderModal() {
   if (S.modal === 'new-lunch') return `
     <div class="moverlay" onclick="if(event.target===this){S.modal=null;renderAll()}">
       <div class="modal" style="max-width:560px">
@@ -5483,8 +5544,7 @@ function saveVoteSession() {
 // ════════════════════════════════════════════
 // 路由最終擴充
 // ════════════════════════════════════════════
-const __renderPageFinal = renderPageExtended;
-function renderPageExtended() {
+const __renderPageFinal =function _old_renderPageExtended_x(n renderPageExtended() {
   switch(S.page) {
     case 'lunch':  return pgLunch();
     case 'vote':   return pgVote();
@@ -5494,8 +5554,7 @@ function renderPageExtended() {
 }
 
 // ── 最終版 Sidebar（加入訂便當/投票/Debug） ──
-const __renderSidebarFinal = renderSidebar;
-function renderSidebar() {
+function _renderSidebarOld3() {
   const base = __renderSidebarFinal();
   // 在「系統」section 前插入新功能
   return base.replace(
@@ -5527,12 +5586,33 @@ function renderMobileNav() {
 // ── Login 頁加入 Microsoft SSO 按鈕 ──
 const __pgLoginBase = pgLogin;
 function pgLogin() {
-  const base = __pgLoginBase();
-  return base.replace(
-    `<button class="btn lg w-full" onclick="doGuestLogin()" style="justify-content:center">👤 訪客模式（Demo）</button>`,
-    `<button class="btn lg w-full" onclick="doGuestLogin()" style="justify-content:center">👤 訪客模式（Demo）</button>
-     <button class="btn lg w-full" onclick="RemoteAuth.loginWithMicrosoft()" style="justify-content:center;background:#0078d4;color:#fff;border-color:#0078d4">🏢 Microsoft / Outlook 登入</button>`
-  );
+  return `
+  <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--navy);padding:20px">
+    <div style="background:var(--card);border-radius:var(--r3);padding:32px;width:100%;max-width:380px;box-shadow:var(--sh2)">
+      <div style="text-align:center;margin-bottom:24px">
+        <div style="font-size:36px;margin-bottom:8px">📋</div>
+        <div style="font-size:22px;font-weight:700;color:var(--navy)">Form<span style="color:var(--blue)">Hub</span></div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px">電子簽核系統</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div>
+          <label style="font-size:12px;color:var(--text3);display:block;margin-bottom:4px">Email</label>
+          <input type="email" id="login-email" placeholder="your@company.com" style="width:100%">
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--text3);display:block;margin-bottom:4px">密碼</label>
+          <input type="password" id="login-pw" placeholder="••••••••" style="width:100%" onkeydown="if(event.key==='Enter')doLogin()">
+        </div>
+        <div id="login-err" style="font-size:12px;color:var(--red);display:none"></div>
+        <button class="btn pri lg w-full" onclick="doLogin()" style="justify-content:center;margin-top:4px">登入</button>
+        <button class="btn lg w-full" onclick="doGuestLogin()" style="justify-content:center">👤 訪客模式（Demo）</button>
+         <button class="btn lg w-full" onclick="RemoteAuth.loginWithMicrosoft()" style="justify-content:center;background:#0078d4;color:#fff;border-color:#0078d4">🏢 Microsoft / Outlook 登入</button>
+      </div>
+      <div style="text-align:center;margin-top:16px;font-size:11px;color:var(--text4)">
+        如需帳號請聯絡系統管理員
+      </div>
+    </div>
+  </div>`;
 }
 
 // ── 頁面標題加入安全提示 ──
@@ -5580,8 +5660,7 @@ const NotifyDB = {
 };
 
 // 攔截 doSave / doApprove / doSubmit 自動推送通知
-const __doSaveN = doSave;
-async function doSave(status) {
+const __doSaveN = function _old_doSave_x(nction doSave(status) {
   await __doSaveN(status);
   if (status === 'pending')
     NotifyDB.add({ type:'submit', icon:'📤', title:'表單已送出審核', body:`您的申請單已進入簽核流程`, page:'sent' });
@@ -6058,7 +6137,7 @@ function submitComment(formId) {
 
 // pgView 加入留言區塊
 const __pgViewFinal = pgView;
-function pgView() {
+function _old_pgView_x() {
   const base = __pgViewFinal();
   const f = S.forms.find(x=>x.id===S.formId);
   if (!f) return base;
@@ -6090,7 +6169,7 @@ function renderSignaturePad(formId) {
         <button class="btn sm" onclick="clearSigCanvas()">清除重簽</button>
         <label class="btn sm" style="cursor:pointer">📁 匯入圖檔<input type="file" accept="image/*" style="display:none" onchange="importSignature(this,'${formId}')"></label>
       </div>
-      <script>setTimeout(()=>initSigCanvas(),50)<\/script>
+      <!-- sigcanvas will be initialized -->
       `:'<div class="txt-muted txt-sm">表單核准後簽名將鎖定</div>'}
     </div>
   </div>`;
@@ -6164,7 +6243,7 @@ async function clearSignature(formId) {
 
 // pgView 加入電子簽名
 const __pgViewWithComment = pgView;
-function pgView() {
+function _old_pgView_xx() {
   const base = __pgViewWithComment();
   const f = S.forms.find(x=>x.id===S.formId);
   if (!f) return base;
@@ -6174,8 +6253,7 @@ function pgView() {
 // ════════════════════════════════════════════
 // Dashboard 加入圖表入口 + 快速搜尋 Ctrl+K
 // ════════════════════════════════════════════
-const __pgDashboardFinal = pgDashboard;
-function pgDashboard() {
+const __pgDashboardFinal = pgDashfunction _old_pgDashboard_x(hboard() {
   const base = __pgDashboardFinal();
   return `
   <!-- 快速功能捷徑 -->
@@ -6199,7 +6277,7 @@ window.addEventListener('keydown', e => {
 
 // 全局搜尋 Modal
 const __renderModalSearch = renderModal;
-function renderModal() {
+function _removed_renderModal() {
   if (S.modal==='global-search') {
     const q=(document.getElementById('global-search-input')?.value||S._searchQ||'').toLowerCase();
     const results = q.length>=1 ? S.forms.filter(f=>
@@ -6275,8 +6353,8 @@ function doSaveTemplate() {
 // ════════════════════════════════════════════
 // 路由最終擴充 v5
 // ════════════════════════════════════════════
-const __renderPageV5 = renderPageExtended;
-function renderPageExtended() {
+const __renderPageFinal = renderPageExtended;
+function _old_renderPageExtended_x() {
   switch (S.page) {
     case 'notifications':    return pgNotifications();
     case 'dashboard-charts': return pgDashboardCharts();
@@ -6286,8 +6364,7 @@ function renderPageExtended() {
 }
 
 // ── Sidebar 加入新功能入口 ──
-const __renderSidebarV5 = renderSidebar;
-function renderSidebar() {
+function _renderSidebarOld4() {
   const base = __renderSidebarV5();
   const unread = NotifyDB.unread().length;
   return base.replace(
@@ -7236,8 +7313,8 @@ function exportMESReport() {
 // ════════════════════════════════════════════
 // Modal 擴充 — Wiki / ISO / MES
 // ════════════════════════════════════════════
-const __renderModalV6 = renderModal;
-function renderModal() {
+const __renderModalBase = renderModal;
+function _removed_renderModal() {
   if (S.modal==='wiki-import') return `
     <div class="moverlay" onclick="if(event.target===this){S.modal=null;renderAll()}">
       <div class="modal">
@@ -7489,7 +7566,7 @@ function scanQRWorkOrder(orderId) {
 // 路由擴充 v6
 // ════════════════════════════════════════════
 const __renderPageV6 = renderPageExtended;
-function renderPageExtended() {
+function _old_renderPageExtended_x_v6() {
   switch(S.page) {
     case 'wiki':       return pgWiki();
     case 'iso':        return pgISO();
@@ -7501,8 +7578,7 @@ function renderPageExtended() {
 }
 
 // ── Dashboard 加入新功能捷徑 ──
-const __pgDashV6 = pgDashboard;
-function pgDashboard() {
+const __pgDashV6 =function _old_pgDashboard_x(n pgDashboard() {
   const base = __pgDashV6();
   const mesPending = MESDB.getOrders().filter(o=>o.status==='running').length;
   const isoExpiring = ISODB.getAll().filter(d=>d.reviewDate&&d.reviewDate<=new Date(Date.now()+30*86400000).toISOString().slice(0,10)&&d.status==='approved').length;
@@ -7516,8 +7592,7 @@ function pgDashboard() {
 }
 
 // ── Sidebar 加入新功能 ──
-const __renderSidebarV6 = renderSidebar;
-function renderSidebar() {
+function _renderSidebarOld5() {
   return __renderSidebarV6().replace(
     '<div class="sb-lbl">生活功能</div>',
     `<div class="sb-lbl">知識與文件</div>
@@ -7608,8 +7683,7 @@ function showFieldHistory(formId, fieldId, fieldLabel) {
 }
 
 // ── doEdit 強化：記錄 fieldId（確保每個欄位都有 ID） ──
-const __doEditFieldHistory = doEdit;
-async function doEdit(id) {
+const __doEditFieldHistory = doEdit;function _old_doEdit_x(doEdit(id) {
   const who    = document.getElementById('ed-who')?.value?.trim();
   const reason = document.getElementById('ed-reason')?.value?.trim();
   if (!who || !reason) { toast('請填寫修改人與修改原因'); return; }
@@ -7864,8 +7938,8 @@ const tdValueStyle = 'padding:8px 12px;font-size:13px;color:var(--text);border-b
 const tdActionStyle = 'padding:6px 8px;border-bottom:1px solid var(--border);vertical-align:middle;text-align:right;width:110px';
 
 // ── 欄位歷史 Modal ──
-const __renderModalFieldHistory = renderModal;
-function renderModal() {
+const __renderModalV6 = renderModal;
+function _removed_renderModal() {
   if (S.modal === 'field-history') {
     const formId = S._fieldHistoryFormId;
     const fieldId = S._fieldHistoryFieldId;
@@ -8701,9 +8775,8 @@ async function publishPostNow(id) {
 
 // ════════════════════════════════════════════
 // Modal 擴充 v8
-// ════════════════════════════════════════════
-const __renderModalV8 = renderModal;
-function renderModal() {
+// ════════════════════════════════════════function _old_renderModal_x(dalV8 = renderModal;
+function _removed_renderModal() {
   if (S.modal==='sensitive-confirm') {
     const alerts=S._sensitiveAlerts||[];
     return`
@@ -9091,9 +9164,7 @@ function delSensitiveRule(idx) {
   const rules=SensitiveRules.get();rules.splice(idx,1);SensitiveRules.set(rules);renderAll();
 }
 
-// ── 路由擴充 v8 ──
-const __renderPageV8=renderPageExtended;
-function renderPageExtended(){
+// ── 路由擴充 v8 ──function _old_renderPageExtended_x(function _old_renderPageExtended_x(rPageExtended(){
   switch(S.page){
     case 'sensitive-approvals': return pgSensitiveApprovals();
     case 'newsletter':          return pgNewsletter();
@@ -9106,7 +9177,7 @@ function renderPageExtended(){
 
 // ── Sidebar 擴充 v8 ──
 const __renderSidebarV8=renderSidebar;
-function renderSidebar(){
+function _renderSidebarOld6(){
   const sensitivePending=SensitiveApprovalDB.pending().length;
   const socialPending=SocialDB.getPosts().filter(p=>p.status==='review').length;
   return __renderSidebarV8().replace(
@@ -9131,19 +9202,80 @@ function renderSidebar(){
 // ── Settings 加入敏感規則設定入口 ──
 const __pgSettingsV8=pgSettings;
 function pgSettings(){
-  return __pgSettingsV8()+`
+  return`
+  <div class="pg-hdr">
+    <div class="pg-title">⚙️ 表單與部門設定</div>
+    <div class="pg-sp"></div>
+    <button class="btn pri" onclick="S.modal='add-dept';renderAll()">＋ 新增部門</button>
+  </div>
+  ${S.depts.map(dept=>`
+  <div class="sec">
+    <div class="sec-hdr" style="background:${dept.color};display:flex;align-items:center;justify-content:space-between">
+      <span>${dept.name} <span style="opacity:.7;font-size:11px">${dept.prefix}</span></span>
+      <button class="btn sm" style="background:rgba(255,255,255,.2);border:none;color:#fff;font-size:11px" onclick="S.modal='del-dept:${dept.id}';renderAll()">刪除部門</button>
+    </div>
+    <div class="sec-body">
+      <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:8px">📋 表單清單</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
+        ${(dept.forms||[]).map((ft,i)=>`<span style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:3px 10px;font-size:12px;display:flex;align-items:center;gap:5px">
+          ${ft}<button onclick="delFormType('${dept.id}',${i})" style="background:none;border:none;cursor:pointer;color:var(--text4);font-size:11px;padding:0;margin-left:2px">✕</button>
+        </span>`).join('')}
+        <button class="btn sm" onclick="addFormType('${dept.id}')">+ 新增表單類型</button>
+      </div>
+      <div class="divider"></div>
+      <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:8px">🔧 自訂欄位</div>
+      <div id="fld-${dept.id}">
+        ${(dept.fields||[]).map(fd=>`
+        <div class="fb-item">
+          <input type="text" value="${fd.label}" placeholder="欄位名稱" onchange="updField('${dept.id}','${fd.id}','label',this.value)">
+          <select onchange="updField('${dept.id}','${fd.id}','type',this.value)">
+            <option value="text"${fd.type==='text'?' selected':''}>文字</option>
+            <option value="number"${fd.type==='number'?' selected':''}>數字</option>
+            <option value="date"${fd.type==='date'?' selected':''}>日期</option>
+            <option value="select"${fd.type==='select'?' selected':''}>下拉</option>
+            <option value="textarea"${fd.type==='textarea'?' selected':''}>多行文字</option>
+            <option value="tel"${fd.type==='tel'?' selected':''}>電話</option>
+          </select>
+          <label style="font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer;white-space:nowrap">
+            <input type="checkbox"${fd.req?' checked':''} onchange="updField('${dept.id}','${fd.id}','req',this.checked)">必填
+          </label>
+          <button class="btn sm dan" onclick="delField('${dept.id}','${fd.id}')">刪</button>
+          ${fd.type==='select'?`<input type="text" value="${fd.opts||''}" placeholder="選項,逗號,分隔" style="grid-column:1/-1" onchange="updField('${dept.id}','${fd.id}','opts',this.value)">`:'<span></span>'}
+        </div>`).join('')}
+      </div>
+      <button class="btn sm mt-1" onclick="addField('${dept.id}')">+ 新增欄位</button>
+      <div class="divider"></div>
+      <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:8px">✍️ 簽核流程</div>
+      ${(S.flows[dept.id]||[]).map((step,i)=>`
+      <div class="flow-item">
+        <input type="text" value="${step.role}" placeholder="職稱/角色" onchange="updFlow('${dept.id}',${i},'role',this.value)">
+        <input type="text" value="${step.uid||''}" placeholder="使用者ID" onchange="updFlow('${dept.id}',${i},'uid',this.value)">
+        <button class="btn sm dan" onclick="delFlow('${dept.id}',${i})">刪</button>
+      </div>`).join('')}
+      <button class="btn sm mt-1" onclick="addFlow('${dept.id}')">+ 新增關卡</button>
+    </div>
+  </div>`).join('')}`;
+
+  + \`
   <div class="card" style="margin-top:14px;border:1.5px solid var(--amber)">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
       <div><div style="font-size:14px;font-weight:600">⚠️ 敏感數值審核規則</div>
-      <div class="txt-xs txt-muted mt-1">設定哪些欄位修改需要額外審核（金額門檻、變動幅度、敏感資料）</div></div>
+      <div class="txt-xs txt-muted mt-1">設定哪些欄位修改需要額外審核</div></div>
       <button class="btn warn" onclick="S.modal='sensitive-rules';renderAll()">設定規則</button>
     </div>
-  </div>`;
+  </div>
+  <div class="card" style="margin-top:14px;border:1.5px solid var(--blue)">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div><div style="font-size:14px;font-weight:600">🛡️ 安全管理</div>
+      <div class="txt-xs txt-muted mt-1">安全評分、帳號管理、稽核日誌</div></div>
+      <button class="btn pri" onclick="S.page='security-dashboard';renderAll()">前往安全儀表板 →</button>
+    </div>
+  </div>\`;
 }
 
 // ── Dashboard 快捷入口更新 ──
-const __pgDashV8=pgDashboard;
-function pgDashboard(){
+const __pgDashV8 = pgDashboard;
+function _old_pgDashboard_xx(){
   return __pgDashV8().replace(
     '<button class="btn sm" onclick="S.page=\'vote\';renderAll()">🗳️ 投票</button>',
     `<button class="btn sm" onclick="S.page='vote';renderAll()">🗳️ 投票</button>
@@ -9884,9 +10016,8 @@ function createInvoice(orderId) {
 
 // ══════════════════════════════════════════
 // Modal 擴充 v9
-// ══════════════════════════════════════════
-const __renderModalV9=renderModal;
-function renderModal(){
+// ═════════════════════════════function _old_renderModal_x(_renderModalV9=renderModal;
+function _removed_renderModal(){
   if(S.modal==='new-opp'||S.modal?.startsWith('new-opp:')) {
     const initStage=S.modal.includes(':')?S.modal.split(':')[1]:'lead';
     return`
@@ -10319,9 +10450,7 @@ setInterval(()=>{
 
 // ══════════════════════════════════════════
 // 路由擴充 v9
-// ══════════════════════════════════════════
-const __renderPageV9=renderPageExtended;
-function renderPageExtended(){
+// ═══════════════════════════════════function _old_renderPageExtended_x(function _old_renderPageExtended_x(n renderPageExtended(){
   switch(S.page){
     case 'sales-funnel': return pgSalesFunnel();
     case 'prospects':    return pgProspects();
@@ -10332,7 +10461,7 @@ function renderPageExtended(){
 
 // ── Sidebar 擴充 ──
 const __renderSidebarV9=renderSidebar;
-function renderSidebar(){
+function _renderSidebarOld7(){
   const oppAlerts=SalesDB.getOpps().filter(o=>{
     if(o.stage==='won'||o.stage==='lost')return false;
     return o.lastContactDate?Math.floor((new Date()-new Date(o.lastContactDate))/86400000)>7:true;
@@ -10351,8 +10480,7 @@ function renderSidebar(){
 }
 
 // ── Dashboard 加入業務快捷 ──
-const __pgDashV9=pgDashboard;
-function pgDashboard(){
+cofunction _old_pgDashboard_xfunction _old_pgDashboard_xx(shboard(){
   const base=__pgDashV9();
   const wonToday=SalesDB.getOpps().filter(o=>o.stage==='won'&&o.wonDate===today()).length;
   return base.replace(
@@ -10873,9 +11001,8 @@ function markAllReviewed() {
 
 // ══════════════════════════════════════════
 // Modal 擴充 v10
-// ══════════════════════════════════════════
-const __renderModalV10 = renderModal;
-function renderModal() {
+// ═════════════════════════function _old_renderModal_x(st __renderModalV10 = renderModal;
+function _removed_renderModal() {
   if(S.modal==='email-track-settings') {
     const cfg = EmailTracker.getSettings();
     return `
@@ -11110,15 +11237,12 @@ if(fbReady && typeof fsOnSnap !== 'undefined') {
 
 // ══════════════════════════════════════════
 // 路由 & Sidebar 擴充 v10
-// ══════════════════════════════════════════
-const __renderPageV10 = renderPageExtended;
-function renderPageExtended() {
+// ═══════════════════════════════function _old_renderPageExtended_x(function _old_renderPageExtended_x(function _removed_renderPageExtended() {
   if(S.page === 'email-tracker') return pgEmailTracker();
   return __renderPageV10();
 }
 
-const __renderSidebarV10 = renderSidebar;
-function renderSidebar() {
+function _renderSidebarOld8() {
   const overdue = EmailTracker.getOverdueEmails().length;
   const review  = EmailTracker.getNeedsReview().length;
   return __renderSidebarV10().replace(
@@ -11132,13 +11256,88 @@ function renderSidebar() {
 }
 
 const __pgDashV10 = pgDashboard;
-function pgDashboard() {
-  const overdue = EmailTracker.getOverdueEmails().length;
-  return __pgDashV10().replace(
-    '<button class="btn sm" onclick="S.page=\'sales-funnel\';renderAll()">🏆 業務漏斗',
-    `<button class="btn sm" onclick="S.page='email-tracker';renderAll()">📨 Email追蹤${overdue?` <span style="background:var(--amber);color:#fff;border-radius:99px;padding:0 5px;font-size:10px">${overdue}</span>`:''}</button>
-     <button class="btn sm" onclick="S.page='sales-funnel';renderAll()">🏆 業務漏斗`
-  );
+function pgDashboard(){
+  const f=S.forms,pend=myPending(),dr=myDraft(),ov=overdue();
+  const recent=[...f].sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,8);
+  const deptStats=S.depts.map(d=>({...d,cnt:f.filter(x=>x.deptId===d.id).length,pend:f.filter(x=>x.deptId===d.id&&x.status==='pending').length}));
+
+  return`
+  <div class="pg-hdr">
+    <div>
+      <div class="pg-title">我的首頁</div>
+      <div class="pg-sub">歡迎回來，${S.currentUser.name} · ${today()}</div>
+    </div>
+    <div class="pg-sp"></div>
+    <button class="btn pri" onclick="go('new-form')">＋ 新增申請單</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat" style="border-left:3px solid var(--amber)">
+      <div class="stat-v" style="color:var(--amber)">${pend.length}</div>
+      <div class="stat-l">待我處理</div>
+    </div>
+    <div class="stat" style="border-left:3px solid var(--blue)">
+      <div class="stat-v" style="color:var(--blue)">${dr.length}</div>
+      <div class="stat-l">草稿</div>
+    </div>
+    <div class="stat" style="border-left:3px solid var(--green)">
+      <div class="stat-v" style="color:var(--green)">${myApproved().length}</div>
+      <div class="stat-l">已核准</div>
+    </div>
+    <div class="stat" style="border-left:3px solid var(--red)">
+      <div class="stat-v" style="color:var(--red)">${ov.length}</div>
+      <div class="stat-l">逾期未結</div>
+    </div>
+    <div class="stat" style="border-left:3px solid var(--purple)">
+      <div class="stat-v" style="color:var(--purple)">${f.length}</div>
+      <div class="stat-l">全部單據</div>
+    </div>
+  </div>
+
+  ${pend.length?`
+  <div class="sec">
+    <div class="sec-hdr wine">📥 等待我處理的文件 (${pend.length})</div>
+    <div class="tbl-wrap" style="border:none;border-radius:0">
+      <table class="tbl">
+        <thead><tr><th>序號</th><th>表單類型</th><th>申請人</th><th>部門</th><th>日期</th><th>狀態</th><th></th></tr></thead>
+        <tbody>${pend.map(f=>`<tr onclick="goView('${f.id}')">
+          <td class="mono">${f.seq}</td>
+          <td>${f.formType||'-'}</td>
+          <td>${f.applicant}</td>
+          <td><span class="badge b-blue" style="background:${deptOf(f.deptId).color+'22'};color:${deptOf(f.deptId).color}">${deptOf(f.deptId).name}</span></td>
+          <td class="txt-muted txt-xs">${fmtDate(f.date)}</td>
+          <td><span class="badge ${statusCls(f.status)}">${statusLabel(f.status)}</span></td>
+          <td><button class="btn sm pri" onclick="event.stopPropagation();goApprove('${f.id}')">審核</button></td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>
+  </div>`:''  }
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+    <div class="sec">
+      <div class="sec-hdr navy">📊 各部門統計</div>
+      <div style="padding:12px">
+        ${deptStats.map(d=>`
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="goDept('${d.id}')">
+            <span style="width:8px;height:8px;border-radius:50%;background:${d.color};flex-shrink:0"></span>
+            <span style="font-size:12px;flex:1">${d.name}</span>
+            <span style="font-size:11px;color:var(--text3)">${d.cnt}件</span>
+            ${d.pend?`<span class="badge b-pending">${d.pend}待審</span>`:''}
+          </div>`).join('')}
+      </div>
+    </div>
+    <div class="sec">
+      <div class="sec-hdr olive">📋 最近單據</div>
+      <div style="padding:10px">
+        ${recent.map(f=>`<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="goView('${f.id}')">
+          <span class="badge ${statusCls(f.status)}" style="flex-shrink:0">${statusLabel(f.status)}</span>
+          <span style="font-size:11px;font-family:var(--mono);color:var(--blue)">${f.seq}</span>
+          <span style="font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.formType||''}</span>
+          <span style="font-size:10px;color:var(--text4)">${f.date}</span>
+        </div>`).join('')}
+      </div>
+    </div>
+  </div>`;
 }
 
 console.log('✅ FormHub v2 第十階段 已載入');
@@ -11881,7 +12080,7 @@ function renderModal() {
         </div>
       </div>
     </div>`;
-  return __renderModalV11();
+  return ''; // fallback: no matching modal
 }
 
 function genPassword() {
@@ -11925,12 +12124,11 @@ function renderPageExtended() {
   switch(S.page) {
     case 'security-dashboard': return pgSecurityDashboard();
     case 'user-mgr':           return pgUserMgr();
-    default:                   return __renderPageV11();
+    default:                   return `<div class='empty'><div class='empty-ic'>📄</div>頁面不存在：${S.page}</div>`;
   }
 }
 
-const __renderSidebarV11 = renderSidebar;
-function renderSidebar() {
+function _renderSidebarOld9() {
   const sensitiveCount  = typeof SensitiveApprovalDB!=='undefined' ? SensitiveApprovalDB.pending().length : 0;
   const securityAlerts  = (AuditLog?.getAll()||[]).filter(l=>l.action==='security_alert'&&l.time>new Date(Date.now()-86400000).toISOString()).length;
   return __renderSidebarV11().replace(
@@ -12033,52 +12231,64 @@ const Renderer = {
 
   _doRender() {
     const t0 = performance.now();
-
-    // Header：只在 currentUser 或 modal 改變時更新
-    this.update('hdr', renderHdr());
-
-    // DeptBar：只在部門或頁面改變時更新
-    this.update('deptbar', renderDeptBar());
-
-    // Sidebar：只在頁面/狀態改變時更新
-    this.update('sb', renderSidebar());
-
-    // Main：頁面內容（最重要，幾乎每次都要更新）
-    const mainEl = document.getElementById('main');
-    if(mainEl) {
-      const html = S.loading ? renderLoading() : renderPage();
-      mainEl.innerHTML = html;
-      // 更新 hash
-      this._hash['main'] = this.hash(html);
-    }
-
-    // Mobile Nav
-    this.update('mnav', renderMobileNav());
-
-    // Modal：有 modal 才渲染
-    const modalEl = document.getElementById('modal-root');
-    if(modalEl) {
-      const html = S.modal ? renderModal() : '';
-      if(this._hash['modal'] !== this.hash(html)) {
-        this._hash['modal'] = this.hash(html);
-        modalEl.innerHTML = html;
+    try {
+      // Header
+      this.update('hdr', renderHdr());
+      // DeptBar
+      this.update('deptbar', renderDeptBar());
+      // Sidebar
+      this.update('sb', renderSidebar());
+      // Main：最重要，直接設定不走 hash 比對
+      const mainEl = document.getElementById('main');
+      if(mainEl) {
+        const html = S.loading ? renderLoading() : renderPage();
+        mainEl.innerHTML = html;
+        this._hash['main'] = this.hash(html);
       }
-    }
-
-    // Restore 輸入框狀態
-    if(S.lineText && S.page === 'new-form') {
-      const ta = document.getElementById('line-ta');
-      if(ta && ta.value !== S.lineText) ta.value = S.lineText;
-    }
-
-    // Watermark
-    if(typeof Watermark !== 'undefined' && S.currentUser?.name) {
-      if(!document.getElementById('wm-overlay')) Watermark.show();
-    }
-
-    // Debug 效能計時
-    if(typeof DebugSys !== 'undefined' && DebugSys.enabled) {
-      DebugSys.log('render', `${(performance.now()-t0).toFixed(1)}ms`);
+      // Mobile Nav
+      this.update('mnav', renderMobileNav());
+      // Modal
+      const modalEl = document.getElementById('modal-root');
+      if(modalEl) {
+        const html = S.modal ? renderModal() : '';
+        if(this._hash['modal'] !== this.hash(html)) {
+          this._hash['modal'] = this.hash(html);
+          modalEl.innerHTML = html;
+        }
+      }
+      // Restore 輸入框
+      if(S.lineText && S.page === 'new-form') {
+        const ta = document.getElementById('line-ta');
+        if(ta && ta.value !== S.lineText) ta.value = S.lineText;
+      }
+      // Watermark
+      if(typeof Watermark !== 'undefined' && S.currentUser?.name && S.currentUser.name !== '訪客') {
+        if(!document.getElementById('wm-overlay')) Watermark.show();
+      }
+      // Debug
+      if(typeof DebugSys !== 'undefined' && DebugSys.enabled) {
+        DebugSys.log('render', `${(performance.now()-t0).toFixed(1)}ms`);
+      }
+      // 初始化 Canvas（替代 inline script）
+      requestAnimationFrame(()=>{
+        if(S.page==='mindmap'&&S.mindMapId&&typeof initMindMap==='function'){
+          const c=document.getElementById('mindmap-canvas');
+          if(c&&!c._initialized){c._initialized=true;initMindMap(S.mindMapId);}
+        }
+        if(document.getElementById('sig-canvas')&&typeof initSigCanvas==='function'){
+          const c=document.getElementById('sig-canvas');
+          if(c&&!c._initialized){c._initialized=true;initSigCanvas();}
+        }
+      });
+    } catch(e) {
+      // 渲染失敗時嘗試直接渲染 main（最低限度確保頁面顯示）
+      console.error('Render error:', e);
+      try {
+        const mainEl = document.getElementById('main');
+        if(mainEl) mainEl.innerHTML = renderPage();
+      } catch(e2) {
+        console.error('Fallback render also failed:', e2);
+      }
     }
   }
 };
@@ -12087,8 +12297,14 @@ const Renderer = {
 // 2. renderAll 防抖 + RAF 優化
 // ══════════════════════════════════════════
 // 覆寫原本的 renderAll，改用智慧渲染
-window.renderAll = function() {
-  Renderer.render();
+window.renderAll = function(force) {
+  if(force) {
+    // 強制同步渲染（用於 BOOT 完成、loading 狀態改變）
+    Renderer._hash = {}; // 清除快取，確保完整更新
+    Renderer._doRender();
+  } else {
+    Renderer.render();
+  }
 };
 
 // ══════════════════════════════════════════
