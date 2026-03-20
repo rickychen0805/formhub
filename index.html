@@ -2487,7 +2487,2111 @@ window.addEventListener('resize',()=>{
   }
 })();
 
-console.log('🚀 FormHub v2 已載入，第一階段功能完整版');
-</script>
-</body>
-</html>
+console.log('🚀 FormHub v2 完整版已載入');
+
+// ════════════════════════════════════════════
+// 第二階段：正航ERP / 郵件管理 / Teams / NAS / n8n
+// ════════════════════════════════════════════
+
+const IntegCfg = {
+  get: () => L.get('integ_cfg') || {
+    erp:{enabled:false,baseUrl:'',apiKey:'',syncInterval:60},
+    teams:{enabled:false,webhookUrl:''},
+    nas:{enabled:false,baseUrl:'',username:'',archivePath:'/FormHub'},
+    email:{enabled:false,provider:'smtp',host:'',port:587,user:'',from:''},
+    n8n:{enabled:false,baseUrl:'',webhookPath:'/webhook/formhub'}
+  },
+  set: v => { L.set('integ_cfg',v); if(fbReady) DB.setCfg('integ_cfg',v); }
+};
+
+// ── 正航 ERP ──
+const ERP = {
+  async push(form) {
+    const cfg=IntegCfg.get().erp;
+    if(!cfg.enabled||!cfg.baseUrl) return {ok:false,msg:'正航ERP未設定'};
+    const dept=deptOf(form.deptId);
+    const payload={formNo:form.seq,formType:form.formType,dept:dept.name,applicant:form.applicant,date:form.date,vendor:form.fields?.f1||'',amount:calcTotal(form.items),materialNo:form.fields?.f3||'',orderNo:form.fields?.f4||'',items:(form.items||[]).map(i=>({name:i.name,qty:i.qty,unit:i.unit,price:i.price}))};
+    try {
+      const r=await fetch(`${cfg.baseUrl}/api/forms/import`,{method:'POST',headers:{'Content-Type':'application/json','X-API-Key':cfg.apiKey},body:JSON.stringify(payload)});
+      const data=await r.json();
+      return {ok:r.ok,msg:data.message||'已推送到正航'};
+    } catch(e) { return {ok:false,msg:'連線失敗：'+e.message}; }
+  },
+  exportCSV(deptId,dateFrom,dateTo) {
+    let forms=S.forms;
+    if(deptId) forms=forms.filter(f=>f.deptId===deptId);
+    if(dateFrom) forms=forms.filter(f=>f.date>=dateFrom);
+    if(dateTo) forms=forms.filter(f=>f.date<=dateTo);
+    const rows=[['序號','表單類型','部門','申請人','日期','狀態','廠商','金額']];
+    forms.forEach(f=>{const dept=deptOf(f.deptId);rows.push([f.seq,f.formType||'',dept.name,f.applicant,f.date,statusLabel(f.status),f.fields?.f1||'',calcTotal(f.items)]);});
+    const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob=new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`FormHub_Export_${today()}.csv`;a.click();
+    toast('✓ CSV 已匯出');
+  },
+  async importCSV(file) {
+    return new Promise((res,rej)=>{
+      const r=new FileReader();
+      r.onload=e=>{
+        const text=e.target.result.replace(/^\uFEFF/,'');
+        const lines=text.split('\n').filter(l=>l.trim());
+        const headers=lines[0].split(',').map(h=>h.replace(/^"|"$/g,'').trim());
+        const records=[];
+        for(let i=1;i<lines.length;i++){const vals=lines[i].split(',').map(v=>v.replace(/^"|"$/g,'').trim());const obj={};headers.forEach((h,j)=>{obj[h]=vals[j]||''});records.push(obj);}
+        toast(`✓ 讀取 ${records.length} 筆資料`);res(records);
+      };
+      r.onerror=rej;r.readAsText(file,'utf-8');
+    });
+  }
+};
+
+// ── Teams 通知 ──
+const Teams = {
+  async notify(form,event) {
+    const cfg=IntegCfg.get().teams;
+    if(!cfg.enabled||!cfg.webhookUrl) return;
+    const dept=deptOf(form.deptId);
+    const colorMap={approved:'00b050',rejected:'ff0000',pending:'ffa500',draft:'808080'};
+    const card={'@type':'MessageCard','@context':'http://schema.org/extensions',themeColor:colorMap[form.status]||'0078d4',summary:`FormHub: ${form.seq} ${statusLabel(form.status)}`,sections:[{activityTitle:`📋 ${form.formType||'表單'} — ${form.seq}`,activitySubtitle:`${dept.name} · ${form.applicant} · ${fmtDate(form.date)}`,facts:[{name:'狀態',value:statusLabel(form.status)},{name:'事件',value:{on_submit:'📤 送出審核',on_approve:'✅ 已核准',on_reject:'❌ 已退回',on_create:'🆕 新建立'}[event]||event},...(form.fields?.f1?[{name:'主要資料',value:form.fields.f1}]:[]),...(calcTotal(form.items)>0?[{name:'金額',value:fmtMoney(calcTotal(form.items))}]:[])]}],potentialAction:[{'@type':'OpenUri',name:'開啟表單',targets:[{os:'default',uri:window.location.href.split('?')[0]+'?form='+encodeURIComponent(form.seq)}]}]};
+    try { await fetch(cfg.webhookUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(card)}); }
+    catch(e) { console.warn('Teams notify failed:',e); }
+  }
+};
+
+// ── NAS 歸檔 ──
+const NAS = {
+  async archive(form) {
+    const cfg=IntegCfg.get().nas;
+    if(!cfg.enabled||!cfg.baseUrl) return {ok:false,msg:'NAS 未設定'};
+    const dept=deptOf(form.deptId);
+    const path=`${cfg.archivePath}/${dept.name}/${new Date().getFullYear()}/${form.seq}.json`;
+    const n8nCfg=IntegCfg.get().n8n;
+    if(!n8nCfg.enabled) return {ok:false,msg:'需要 n8n 中轉才能寫入 NAS'};
+    try {
+      await fetch(`${n8nCfg.baseUrl}${n8nCfg.webhookPath}/nas-archive`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,content:JSON.stringify({...form,exportedAt:now()},null,2),nasUrl:cfg.baseUrl,username:cfg.username})});
+      return {ok:true,msg:`已歸檔至 NAS: ${path}`};
+    } catch(e) { return {ok:false,msg:'歸檔失敗：'+e.message}; }
+  }
+};
+
+// ── 郵件管理 ──
+const MailMgr = {
+  async analyzeEmail(email) {
+    const sys=`你是郵件分析助手。分析郵件，提取客戶、專案、待辦、跟進日期。只回傳JSON：
+{"customer":"客戶名稱","project":"專案","actions":["待辦1"],"followUpDate":"YYYY-MM-DD或null","urgency":"高/中/低","summary":"摘要"}`;
+    try {
+      const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,system:sys,messages:[{role:'user',content:`主旨：${email.subject}\n寄件人：${email.from}\n內容：${(email.body||'').slice(0,1000)}`}]})});
+      const data=await r.json();
+      return JSON.parse(data.content?.[0]?.text?.replace(/```json\n?|\n?```/g,'').trim()||'{}');
+    } catch { return {}; }
+  },
+  saveAnalysis(id,analysis) {
+    const all=L.get('mail_analysis')||{};
+    all[id]={...analysis,analyzedAt:now()};
+    L.set('mail_analysis',all);return all;
+  },
+  getAll() { return L.get('mail_analysis')||{}; }
+};
+
+// ── 郵件管理頁面 ──
+function pgMailMgr() {
+  const analyses=MailMgr.getAll();
+  const entries=Object.entries(analyses).sort((a,b)=>(b[1].analyzedAt||'').localeCompare(a[1].analyzedAt||''));
+  const customers=[...new Set(entries.map(([,v])=>v.customer).filter(Boolean))];
+  const followUps=entries.filter(([,v])=>v.followUpDate&&v.followUpDate>today());
+  return `
+  <div class="pg-hdr">
+    <div><div class="pg-title">📧 郵件管理</div><div class="pg-sub">AI 分類 · 客戶追蹤 · 跟單提醒</div></div>
+    <div class="pg-sp"></div>
+    <button class="btn sm pri" onclick="S.page='new-form';renderAll()">建立跟單</button>
+  </div>
+  <div class="stats">
+    <div class="stat" style="border-left:3px solid var(--blue)"><div class="stat-v" style="color:var(--blue)">${entries.length}</div><div class="stat-l">已分析郵件</div></div>
+    <div class="stat" style="border-left:3px solid var(--teal)"><div class="stat-v" style="color:var(--teal)">${customers.length}</div><div class="stat-l">客戶數</div></div>
+    <div class="stat" style="border-left:3px solid var(--amber)"><div class="stat-v" style="color:var(--amber)">${followUps.length}</div><div class="stat-l">待 Follow Up</div></div>
+  </div>
+  <div class="sec">
+    <div class="sec-hdr blue">✉️ 快速分析郵件</div>
+    <div class="sec-body">
+      <p class="txt-xs txt-muted mb-1">貼上郵件內容，AI 自動提取客戶、待辦、跟進日期</p>
+      <div class="flex gap-2 mb-1" style="flex-wrap:wrap">
+        <input type="text" id="mail-subject" placeholder="郵件主旨" style="flex:1;min-width:140px;font-size:12px">
+        <input type="text" id="mail-from" placeholder="寄件人" style="width:160px;font-size:12px">
+      </div>
+      <textarea id="mail-input" placeholder="貼上郵件內文..." style="min-height:90px;font-size:12px"></textarea>
+      <div class="flex gap-2 mt-1">
+        <button class="btn sm pri" onclick="analyzeMailInput()">✨ AI 分析</button>
+        <button class="voice-btn" onclick="voiceFill('mail-input')" title="語音輸入">🎤</button>
+      </div>
+      <div id="mail-result" style="margin-top:10px"></div>
+    </div>
+  </div>
+  ${followUps.length?`
+  <div class="sec">
+    <div class="sec-hdr wine">⏰ 需要 Follow Up (${followUps.length})</div>
+    <div class="sec-body">
+      ${followUps.map(([id,v])=>`
+      <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:18px;flex-shrink:0">${v.urgency==='高'?'🔴':v.urgency==='中'?'🟡':'🟢'}</span>
+        <div style="flex:1">
+          <div style="font-size:12px;font-weight:600">${v.customer||'未知客戶'}${v.project?' · '+v.project:''}</div>
+          <div style="font-size:11px;color:var(--text3)">${v.summary||''}</div>
+          ${(v.actions||[]).length?`<div style="font-size:11px;margin-top:3px;color:var(--text2)">待辦：${v.actions.slice(0,2).join('、')}</div>`:''}
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:11px;color:var(--amber);font-weight:600">${v.followUpDate}</div>
+          <button class="btn sm mt-1" onclick="createFollowUpForm('${id}')">建立跟單</button>
+        </div>
+      </div>`).join('')}
+    </div>
+  </div>`:''}
+  <div class="sec">
+    <div class="sec-hdr olive">👥 客戶往來時間軸</div>
+    <div class="sec-body">
+      ${customers.length===0?'<div class="txt-muted txt-sm">尚無資料，請先分析郵件</div>':
+        customers.map(cust=>{
+          const ce=entries.filter(([,v])=>v.customer===cust);
+          return`<div style="margin-bottom:12px">
+            <div style="font-size:13px;font-weight:600;margin-bottom:5px">🏢 ${cust}</div>
+            ${ce.slice(0,3).map(([,v])=>`<div style="display:flex;gap:8px;padding:4px 0 4px 12px;border-left:2px solid var(--border2)">
+              <span class="txt-xs txt-muted" style="white-space:nowrap">${(v.analyzedAt||'-').slice(0,10)}</span>
+              <span class="txt-xs">${v.summary||''}</span>
+            </div>`).join('')}
+            ${ce.length>3?`<div class="txt-xs txt-muted" style="padding-left:12px">+${ce.length-3} 更多...</div>`:''}
+          </div>`;
+        }).join('')}
+    </div>
+  </div>`;
+}
+
+async function analyzeMailInput() {
+  const body=document.getElementById('mail-input')?.value?.trim();
+  const subject=document.getElementById('mail-subject')?.value?.trim();
+  const from=document.getElementById('mail-from')?.value?.trim();
+  if(!body&&!subject){toast('請輸入郵件內容');return;}
+  const res=document.getElementById('mail-result');
+  if(res)res.innerHTML=`<div class="flex items-c gap-2 txt-xs txt-muted"><span class="spin">⟳</span> AI 分析中...</div>`;
+  const analysis=await MailMgr.analyzeEmail({subject,from,body});
+  const id='mail_'+Date.now();MailMgr.saveAnalysis(id,analysis);
+  if(res)res.innerHTML=`<div style="padding:10px 12px;background:var(--green-lt);border-radius:var(--r);border:1px solid var(--green);font-size:12px">
+    <div style="font-weight:600;color:var(--green);margin-bottom:6px">✓ 分析完成</div>
+    <div style="display:grid;grid-template-columns:80px 1fr;gap:4px 8px">
+      <span class="txt-muted">客戶</span><span>${analysis.customer||'-'}</span>
+      <span class="txt-muted">專案</span><span>${analysis.project||'-'}</span>
+      <span class="txt-muted">緊急度</span><span>${analysis.urgency||'-'}</span>
+      ${analysis.followUpDate?`<span class="txt-muted">跟進日</span><span style="color:var(--amber);font-weight:600">${analysis.followUpDate}</span>`:''}
+      <span class="txt-muted">待辦</span><span>${(analysis.actions||[]).join('、')||'-'}</span>
+    </div>
+    ${analysis.followUpDate?`<button class="btn sm pri mt-1" onclick="createFollowUpForm('${id}')">建立跟單表單</button>`:''}
+  </div>`;
+  toast('✓ 郵件已分析');
+}
+
+function createFollowUpForm(mailId) {
+  const analysis=MailMgr.getAll()[mailId];if(!analysis)return;
+  S.aiParsed={deptId:'SAL',formType:'業務-拜訪紀錄',applicant:S.currentUser.name,fields:{f1:analysis.customer||'',f2:'',f3:'',f4:'',f5:analysis.followUpDate||'',f6:(analysis.actions||[]).join('；')+(analysis.summary?'\n'+analysis.summary:'')},items:[],_ok:true,_summary:`跟單：${analysis.customer}`};
+  S.aiDept='SAL';go('new-form');toast('✓ 已帶入跟單資料');
+}
+
+// ── 整合設定頁 ──
+function pgIntegSettings() {
+  const cfg=IntegCfg.get();
+  return `
+  <div class="pg-hdr">
+    <span class="pg-back" onclick="go('settings')">← 返回</span>
+    <div><div class="pg-title">🔌 系統整合設定</div><div class="pg-sub">正航ERP · Teams · NAS · n8n · Email</div></div>
+    <div class="pg-sp"></div>
+    <button class="btn pri" onclick="saveIntegCfg()">💾 儲存設定</button>
+  </div>
+  <div class="sec">
+    <div class="sec-hdr teal">⚙️ n8n 工作流程自動化（中轉核心）</div>
+    <div class="sec-body">
+      <div class="fg">
+        <label class="fl">啟用</label><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="n8n-enabled" ${cfg.n8n?.enabled?'checked':''}> 啟用 n8n</label>
+        <label class="fl">伺服器 URL</label><input type="text" id="n8n-url" value="${cfg.n8n?.baseUrl||''}" placeholder="https://your-n8n.zeabur.app">
+        <label class="fl">Webhook 路徑</label><input type="text" id="n8n-path" value="${cfg.n8n?.webhookPath||'/webhook/formhub'}">
+      </div>
+      <div class="fhint">n8n 作為所有外部系統的中轉：NAS、郵件、正航ERP、Teams</div>
+    </div>
+  </div>
+  <div class="sec">
+    <div class="sec-hdr gold">🏭 正航 ERP</div>
+    <div class="sec-body">
+      <div class="fg">
+        <label class="fl">啟用</label><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="erp-enabled" ${cfg.erp?.enabled?'checked':''}> 啟用正航ERP串接</label>
+        <label class="fl">API 位址</label><input type="text" id="erp-url" value="${cfg.erp?.baseUrl||''}" placeholder="http://erp-server:8080">
+        <label class="fl">API Key</label><input type="text" id="erp-key" value="${cfg.erp?.apiKey||''}">
+        <label class="fl">同步間隔（分）</label><input type="number" id="erp-interval" value="${cfg.erp?.syncInterval||60}" min="5">
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn sm" onclick="testERPConnection()">🔍 測試連線</button>
+        <button class="btn sm" onclick="ERP.exportCSV()">📥 匯出CSV</button>
+        <label class="btn sm" style="cursor:pointer">📤 匯入CSV<input type="file" accept=".csv" style="display:none" onchange="handleCSVImport(this)"></label>
+      </div>
+      <div class="fhint">採購/生產/倉庫表單核准後自動推送。若無 API，可用定時 CSV 拋入/拋出。</div>
+    </div>
+  </div>
+  <div class="sec">
+    <div class="sec-hdr purple">💬 Microsoft Teams</div>
+    <div class="sec-body">
+      <div class="fg">
+        <label class="fl">啟用</label><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="teams-enabled" ${cfg.teams?.enabled?'checked':''}> 啟用 Teams 通知</label>
+        <label class="fl">Webhook URL</label><input type="text" id="teams-url" value="${cfg.teams?.webhookUrl||''}" placeholder="https://outlook.office.com/webhook/...">
+      </div>
+      <button class="btn sm mt-1" onclick="testTeams()">🔍 測試通知</button>
+      <div class="fhint">Teams 頻道 → 連接器 → Incoming Webhook → 複製 URL</div>
+    </div>
+  </div>
+  <div class="sec">
+    <div class="sec-hdr navy">🗄 NAS 網路硬碟</div>
+    <div class="sec-body">
+      <div class="fg">
+        <label class="fl">啟用</label><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="nas-enabled" ${cfg.nas?.enabled?'checked':''}> 啟用 NAS 自動歸檔</label>
+        <label class="fl">NAS 位址</label><input type="text" id="nas-url" value="${cfg.nas?.baseUrl||''}" placeholder="http://192.168.1.x:5000">
+        <label class="fl">帳號</label><input type="text" id="nas-user" value="${cfg.nas?.username||''}">
+        <label class="fl">歸檔路徑</label><input type="text" id="nas-path" value="${cfg.nas?.archivePath||'/FormHub'}">
+      </div>
+      <div class="fhint">表單核准後自動歸檔至 NAS（透過 n8n 中轉）。支援 Synology / QNAP。</div>
+    </div>
+  </div>
+  <div class="sec">
+    <div class="sec-hdr wine">📧 Email / Outlook 通知</div>
+    <div class="sec-body">
+      <div class="fg">
+        <label class="fl">啟用</label><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="email-enabled" ${cfg.email?.enabled?'checked':''}> 啟用 Email 通知</label>
+        <label class="fl">服務商</label>
+        <select id="email-provider">
+          <option value="smtp" ${cfg.email?.provider==='smtp'?'selected':''}>SMTP</option>
+          <option value="outlook" ${cfg.email?.provider==='outlook'?'selected':''}>Outlook/O365</option>
+          <option value="gmail" ${cfg.email?.provider==='gmail'?'selected':''}>Gmail</option>
+          <option value="n8n" ${cfg.email?.provider==='n8n'?'selected':''}>透過 n8n</option>
+        </select>
+        <label class="fl">SMTP Host</label><input type="text" id="email-host" value="${cfg.email?.host||''}" placeholder="smtp.office365.com">
+        <label class="fl">Port</label><input type="number" id="email-port" value="${cfg.email?.port||587}">
+        <label class="fl">帳號</label><input type="text" id="email-user" value="${cfg.email?.user||''}" placeholder="user@company.com">
+        <label class="fl">寄件人</label><input type="text" id="email-from" value="${cfg.email?.from||''}" placeholder="FormHub &lt;noreply@company.com&gt;">
+      </div>
+      <button class="btn sm mt-1" onclick="testEmail()">🔍 測試寄信</button>
+    </div>
+  </div>`;
+}
+
+async function saveIntegCfg() {
+  const cfg={
+    n8n:{enabled:document.getElementById('n8n-enabled')?.checked||false,baseUrl:document.getElementById('n8n-url')?.value?.trim()||'',webhookPath:document.getElementById('n8n-path')?.value?.trim()||'/webhook/formhub'},
+    erp:{enabled:document.getElementById('erp-enabled')?.checked||false,baseUrl:document.getElementById('erp-url')?.value?.trim()||'',apiKey:document.getElementById('erp-key')?.value?.trim()||'',syncInterval:+document.getElementById('erp-interval')?.value||60},
+    teams:{enabled:document.getElementById('teams-enabled')?.checked||false,webhookUrl:document.getElementById('teams-url')?.value?.trim()||''},
+    nas:{enabled:document.getElementById('nas-enabled')?.checked||false,baseUrl:document.getElementById('nas-url')?.value?.trim()||'',username:document.getElementById('nas-user')?.value?.trim()||'',archivePath:document.getElementById('nas-path')?.value?.trim()||'/FormHub'},
+    email:{enabled:document.getElementById('email-enabled')?.checked||false,provider:document.getElementById('email-provider')?.value||'smtp',host:document.getElementById('email-host')?.value?.trim()||'',port:+document.getElementById('email-port')?.value||587,user:document.getElementById('email-user')?.value?.trim()||'',from:document.getElementById('email-from')?.value?.trim()||''}
+  };
+  IntegCfg.set(cfg);toast('✅ 整合設定已儲存');
+}
+
+async function testERPConnection() {
+  const url=document.getElementById('erp-url')?.value?.trim();
+  const key=document.getElementById('erp-key')?.value?.trim();
+  if(!url){toast('請填寫 ERP API 位址');return;}
+  toast('測試連線中...',4000);
+  try{const r=await fetch(`${url}/api/ping`,{headers:{'X-API-Key':key}});toast(r.ok?'✅ 正航ERP 連線成功！':'❌ 連線失敗：HTTP '+r.status,4000);}
+  catch(e){toast('❌ 連線失敗：'+e.message,4000);}
+}
+async function testTeams() {
+  const url=document.getElementById('teams-url')?.value?.trim();
+  if(!url){toast('請填寫 Teams Webhook URL');return;}
+  try{await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'✅ FormHub Teams 通知測試成功！'})});toast('✅ Teams 通知已送出，請查看頻道');}
+  catch(e){toast('❌ 發送失敗：'+e.message,4000);}
+}
+async function testEmail() {
+  const n8nCfg=IntegCfg.get().n8n;
+  if(!n8nCfg.enabled){toast('請先啟用 n8n');return;}
+  try{await fetch(`${n8nCfg.baseUrl}${n8nCfg.webhookPath}/test-email`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:IntegCfg.get().email.user,subject:'FormHub 郵件測試',body:'這是 FormHub 郵件通知測試。'})});toast('✅ 測試郵件已送出');}
+  catch(e){toast('❌ 失敗：'+e.message,4000);}
+}
+async function handleCSVImport(inp) {
+  const file=inp.files[0];if(!file)return;
+  const records=await ERP.importCSV(file);
+  if(!records.length)return;
+  toast(`✓ 讀取 ${records.length} 筆，首筆：${records[0]['序號']||''}`,4000);
+}
+
+// ── 自動跟單 ──
+const AutoFollow = {
+  setTrack(formId,followDate,note){const t=L.get('auto_tracks')||{};t[formId]={followDate,note,createdAt:now(),done:false};L.set('auto_tracks',t);},
+  getAll(){return L.get('auto_tracks')||{};},
+  markDone(formId){const t=L.get('auto_tracks')||{};if(t[formId]){t[formId].done=true;L.set('auto_tracks',t);}},
+  checkDue(){
+    const t=L.get('auto_tracks')||{};
+    const due=Object.entries(t).filter(([,v])=>!v.done&&v.followDate&&v.followDate<=today());
+    due.forEach(([formId,v])=>{const f=S.forms.find(x=>x.id===formId);if(f)toast(`⏰ 跟單提醒：${f.seq} ${v.note||''}`,6000);});
+    return due;
+  }
+};
+setInterval(()=>{if(!S.loading)AutoFollow.checkDue();},60000);
+setTimeout(()=>AutoFollow.checkDue(),3000);
+
+// ── PDF 匯出 ──
+function exportFormPDF(formId) {
+  const f=S.forms.find(x=>x.id===formId);if(!f)return;
+  const dept=deptOf(f.deptId);
+  const w=window.open('','_blank');
+  const fields=(dept.fields||[]).map(fd=>`<tr><td style="font-weight:600;padding:6px 12px;background:#f5f5f5;border:1px solid #ddd;width:120px">${fd.label}</td><td style="padding:6px 12px;border:1px solid #ddd">${f.fields?.[fd.id]||'-'}</td></tr>`).join('');
+  const items=(f.items||[]).map(it=>`<tr><td style="padding:6px;border:1px solid #ddd">${it.name}</td><td style="padding:6px;border:1px solid #ddd;text-align:center">${it.qty}</td><td style="padding:6px;border:1px solid #ddd;text-align:center">${it.unit}</td><td style="padding:6px;border:1px solid #ddd;text-align:right">NT$ ${Number(it.price).toLocaleString()}</td><td style="padding:6px;border:1px solid #ddd;text-align:right">NT$ ${(it.qty*it.price).toLocaleString()}</td></tr>`).join('');
+  w.document.write(`<!DOCTYPE html><html lang="zh-TW"><head><meta charset="UTF-8"><title>${f.seq}</title>
+  <style>body{font-family:'Noto Sans TC',sans-serif;padding:30px;color:#333;max-width:900px;margin:0 auto}h2{font-size:18px}table{width:100%;border-collapse:collapse;margin-bottom:16px}.sec-t{background:#1a2332;color:#fff;padding:7px 12px;font-size:13px;font-weight:600;margin-top:16px;border-radius:4px 4px 0 0}@media print{button{display:none}}</style>
+  </head><body>
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #1a2332;padding-bottom:14px;margin-bottom:14px">
+    <div><h2>${f.formType||'申請單'}</h2><div style="font-size:13px;color:#666">${dept.name} · ${f.applicant} · ${f.date}</div></div>
+    <div style="text-align:right"><div style="font-family:monospace;font-size:16px;font-weight:700;color:#2563eb">${f.seq}</div><div style="font-size:11px">${statusLabel(f.status)}</div></div>
+  </div>
+  <div class="sec-t">基本資料</div><table><tbody>${fields}</tbody></table>
+  ${items?`<div class="sec-t">品項明細</div><table><thead><tr><th style="padding:7px;background:#f5f5f5;border:1px solid #ddd">品名</th><th style="padding:7px;background:#f5f5f5;border:1px solid #ddd">數量</th><th style="padding:7px;background:#f5f5f5;border:1px solid #ddd">單位</th><th style="padding:7px;background:#f5f5f5;border:1px solid #ddd">單價</th><th style="padding:7px;background:#f5f5f5;border:1px solid #ddd">小計</th></tr></thead><tbody>${items}</tbody><tfoot><tr><td colspan="4" style="text-align:right;padding:8px;font-weight:600">合計</td><td style="padding:8px;border:1px solid #ddd;font-weight:700;color:#2563eb">NT$ ${calcTotal(f.items).toLocaleString()}</td></tr></tfoot></table>`:''}
+  <div class="sec-t">簽核記錄</div><table><thead><tr><th style="padding:7px;background:#f5f5f5;border:1px solid #ddd">關卡</th><th style="padding:7px;background:#f5f5f5;border:1px solid #ddd">審核人</th><th style="padding:7px;background:#f5f5f5;border:1px solid #ddd">結果</th><th style="padding:7px;background:#f5f5f5;border:1px solid #ddd">時間</th><th style="padding:7px;background:#f5f5f5;border:1px solid #ddd">意見</th></tr></thead><tbody>
+  ${(f.approvals||[]).map(a=>`<tr><td style="padding:6px;border:1px solid #ddd">${a.role}</td><td style="padding:6px;border:1px solid #ddd">${a.name||'-'}</td><td style="padding:6px;border:1px solid #ddd">${statusLabel(a.status)}</td><td style="padding:6px;border:1px solid #ddd;font-size:11px">${a.time||'-'}</td><td style="padding:6px;border:1px solid #ddd">${a.comment||'-'}</td></tr>`).join('')}
+  </tbody></table>
+  <div style="text-align:right;font-size:11px;color:#999;margin-top:16px">列印時間：${now()} · FormHub 電子簽核系統</div>
+  <button onclick="window.print()" style="margin-top:12px;padding:8px 20px;background:#1a2332;color:#fff;border:none;border-radius:6px;cursor:pointer">🖨️ 列印 / 存成PDF</button>
+  </body></html>`);w.document.close();
+}
+
+async function pushToERP(formId) {
+  const f=S.forms.find(x=>x.id===formId);if(!f)return;
+  toast('推送至正航 ERP 中...',5000);
+  const result=await ERP.push(f);
+  toast(result.ok?'✅ '+result.msg:'❌ '+result.msg,4000);
+}
+async function archiveToNAS(formId) {
+  const f=S.forms.find(x=>x.id===formId);if(!f)return;
+  toast('歸檔至 NAS 中...',5000);
+  const result=await NAS.archive(f);
+  toast(result.ok?'✅ '+result.msg:'❌ '+result.msg,4000);
+}
+
+// ── 覆寫 renderPageExtended 加入新頁面 ──
+const __renderPageExt=renderPageExtended;
+function renderPageExtended(){
+  switch(S.page){
+    case 'mail-mgr':       return pgMailMgr();
+    case 'integ-settings': return pgIntegSettings();
+    default:               return __renderPageExt();
+  }
+}
+
+// ── 覆寫 triggerWebhooks 加入 Teams/n8n/NAS/ERP ──
+const __triggerBase=triggerWebhooks;
+async function triggerWebhooks(event,form){
+  await __triggerBase(event,form);
+  const cfg=IntegCfg.get();
+  if(cfg.teams?.enabled) await Teams.notify(form,event);
+  if(cfg.n8n?.enabled&&cfg.n8n?.baseUrl){
+    try{const dept=deptOf(form.deptId);await fetch(`${cfg.n8n.baseUrl}${cfg.n8n.webhookPath}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event,seq:form.seq,formType:form.formType,dept:dept.name,deptId:form.deptId,applicant:form.applicant,status:form.status,fields:form.fields,items:form.items,total:calcTotal(form.items),timestamp:now()})});}
+    catch(e){console.warn('n8n webhook failed:',e);}
+  }
+  if(event==='on_approve'&&cfg.nas?.enabled) await NAS.archive(form);
+  if(event==='on_approve'&&cfg.erp?.enabled&&['PUR','MFG','WH'].includes(form.deptId)) await ERP.push(form);
+}
+
+// ── 覆寫 pgView 加入 PDF/ERP/NAS 按鈕 ──
+const __pgViewBase=pgView;
+function pgView(){
+  const f=S.forms.find(x=>x.id===S.formId);
+  if(!f)return`<div class="empty">找不到表單</div>`;
+  const dept=deptOf(f.deptId);
+  const flowDef=S.flows[f.deptId]||[];
+  const canEdit=f.status==='draft'||f.status==='rejected';
+  const cfg=IntegCfg.get();
+  return`
+  <div class="pg-hdr">
+    <span class="pg-back" onclick="go('dashboard')">← 返回</span>
+    <div><div class="pg-title" style="font-family:var(--mono);font-size:15px">${f.seq}</div><div class="pg-sub">${f.formType||''} · ${dept.name}</div></div>
+    <span class="badge ${statusCls(f.status)}" style="font-size:12px;padding:3px 10px">${statusLabel(f.status)}</span>
+    <div class="pg-sp"></div>
+    <div class="pg-acts" style="flex-wrap:wrap">
+      ${canEdit?`<button class="btn" onclick="goEdit('${f.id}')">✏️ 編輯</button>`:''}
+      ${f.status==='draft'?`<button class="btn suc" onclick="doSubmit('${f.id}')">📤 送審</button>`:''}
+      ${f.status==='pending'?`<button class="btn pri" onclick="goApprove('${f.id}')">📋 審核</button>`:''}
+      <button class="btn sm" onclick="showQR('${f.id}')">📲 QR</button>
+      <button class="btn sm" onclick="exportFormPDF('${f.id}')">🖨️ PDF</button>
+      ${cfg.erp?.enabled&&f.status==='approved'?`<button class="btn sm" onclick="pushToERP('${f.id}')">🏭 推送ERP</button>`:''}
+      ${cfg.nas?.enabled&&f.status==='approved'?`<button class="btn sm" onclick="archiveToNAS('${f.id}')">🗄 歸檔NAS</button>`:''}
+    </div>
+  </div>
+  <div class="sec"><div class="sec-hdr wine">📄 基本資料</div><div class="sec-body">
+    <div class="fg w2">
+      <span class="fl">序號</span><div><span class="seq-tag">${f.seq}</span></div>
+      <span class="fl">版本</span><span><span class="badge b-blue">v${f.ver||1}</span></span>
+      <span class="fl">表單類型</span><span>${f.formType||'-'}</span>
+      <span class="fl">部門</span><span><span class="badge" style="background:${dept.color+'22'};color:${dept.color}">${dept.name}</span></span>
+      <span class="fl">申請人</span><span>${f.applicant}</span>
+      <span class="fl">申請日期</span><span>${fmtDate(f.date)}</span>
+      ${(dept.fields||[]).map(fd=>`<span class="fl">${fd.label}</span><span>${f.fields?.[fd.id]||'<span class="txt-muted">—</span>'}</span>`).join('')}
+    </div>
+  </div></div>
+  ${(f.items&&f.items.length>0)?`<div class="sec"><div class="sec-hdr olive">📦 品項明細</div><div class="sec-body" style="padding:0"><div class="sub-wrap"><table class="sub">
+    <thead><tr><th>品名</th><th>數量</th><th>單位</th><th>單價</th><th>小計</th></tr></thead>
+    <tbody>${f.items.map(it=>`<tr><td>${it.name}</td><td>${it.qty}</td><td>${it.unit}</td><td>${fmtMoney(it.price)}</td><td>${fmtMoney(it.qty*it.price)}</td></tr>`).join('')}</tbody>
+    <tfoot><tr><td colspan="4" style="text-align:right">合計</td><td style="color:var(--blue);font-weight:700">${fmtMoney(calcTotal(f.items))}</td></tr></tfoot>
+  </table></div></div></div>`:''}
+  ${(f.photos&&f.photos.length)?`<div class="sec"><div class="sec-hdr teal">📷 附件照片</div><div class="sec-body"><div style="display:flex;flex-wrap:wrap;gap:10px">${f.photos.map(p=>`<img src="${p}" style="width:120px;height:90px;object-fit:cover;border-radius:var(--r);border:1px solid var(--border);cursor:pointer" onclick="window.open('${p}','_blank')">`).join('')}</div></div></div>`:''}
+  <div class="sec"><div class="sec-hdr gold">✍️ 簽核流程</div><div class="sec-body">
+    ${flowDef.length===0?'<div class="txt-muted txt-sm">此部門尚未設定簽核流程</div>':`<div class="ap-steps">
+      ${flowDef.map((step,i)=>{const ap=(f.approvals||[]).find(a=>a.step===i);const doneCount=(f.approvals||[]).filter(a=>a.status==='approved').length;const cls=ap?.status==='approved'?'done':ap?.status==='rejected'?'rej':(f.status==='pending'&&doneCount===i)?'act':'';return`<div class="ap-step"><div class="ap-circle ${cls}">${ap?.status==='approved'?'✓':ap?.status==='rejected'?'✗':i+1}</div><div class="ap-info"><div class="ap-role">${step.role}</div><div class="ap-meta">${ap?.name?ap.name+' · '+ap.time:'等待審核'}</div>${ap?.comment?`<div class="ap-comment">${ap.comment}</div>`:''}</div></div>`;}).join('')}
+    </div>`}
+  </div></div>
+  <div class="sec"><div class="sec-hdr gray">📜 修訂紀錄</div><div class="sec-body">
+    ${[...(f.history||[])].reverse().map(h=>`<div class="rev-item"><div class="rev-meta"><span class="rev-ver">${h.ver}</span><span class="rev-who">${h.who} · ${h.time}</span></div><div class="rev-body">${h.changes.length===0?'<span class="txt-muted txt-xs">初次建立</span>':h.changes.map(c=>`<div class="rev-chg"><strong>${c.field}：</strong><span class="chg-old">${c.old}</span> → <span class="chg-new">${c.new}</span></div>`).join('')}</div><div class="rev-reason">原因：${h.reason}</div></div>`).join('')}
+  </div></div>`;
+}
+
+// ── 覆寫 pgSettings 加入整合設定入口 ──
+const __pgSettingsBase=pgSettings;
+function pgSettings(){
+  return __pgSettingsBase()+`
+  <div class="card" style="margin-top:14px;border:1.5px dashed var(--border2)">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div><div style="font-size:14px;font-weight:600">🔌 系統整合設定</div><div class="txt-xs txt-muted mt-1">正航ERP · Teams · NAS · n8n · Email · Outlook</div></div>
+      <button class="btn pri" onclick="S.page='integ-settings';renderAll()">前往設定 →</button>
+    </div>
+  </div>`;
+}
+
+
+// ════════════════════════════════════════════
+// 第三階段完整版
+// 甘特圖 / 看板 / 行事曆 / 時間軸 / 心智圖
+// 安全機制 / 供應商管理 / 圖片AI辨識
+// 提醒系統 / 個人行事曆
+// ════════════════════════════════════════════
+
+// ── Firebase Auth ──
+let fbAuth = null, currentUser = null;
+async function initAuth() {
+  try {
+    const { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, createUserWithEmailAndPassword } =
+      await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js');
+    const { getApp } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js');
+    fbAuth = getAuth(getApp());
+    onAuthStateChanged(fbAuth, user => {
+      if (user) {
+        S.currentUser = { uid: user.uid, name: user.displayName || user.email.split('@')[0], email: user.email, role: L.get('role_' + user.uid) || 'staff' };
+        S.authReady = true; S.authUser = user;
+        if (S.page === 'login') go('dashboard');
+      } else {
+        S.authReady = true; S.authUser = null;
+        S.page = 'login';
+      }
+      if (!S.loading) renderAll();
+    });
+    window._fbSignIn = (e, p) => signInWithEmailAndPassword(fbAuth, e, p);
+    window._fbSignOut = () => signOut(fbAuth);
+    window._fbRegister = (e, p) => createUserWithEmailAndPassword(fbAuth, e, p);
+  } catch(e) { console.warn('Auth init failed, running without auth', e); S.authReady = true; }
+}
+initAuth();
+
+// ── 角色權限 ──
+const Roles = {
+  ADMIN: 'admin', MANAGER: 'manager', STAFF: 'staff', REVIEWER: 'reviewer', READONLY: 'readonly',
+  can(action) {
+    const r = S.currentUser?.role || 'staff';
+    const perms = {
+      admin:    ['read','write','delete','approve','settings','api'],
+      manager:  ['read','write','approve','settings'],
+      staff:    ['read','write'],
+      reviewer: ['read','approve'],
+      readonly: ['read']
+    };
+    return (perms[r] || perms.staff).includes(action);
+  }
+};
+
+// ── 稽核日誌 ──
+const AuditLog = {
+  async record(action, detail, formId = '') {
+    const entry = { uid: S.currentUser?.uid || 'anon', user: S.currentUser?.name || 'unknown', action, detail, formId, time: now(), page: S.page };
+    const logs = L.get('audit_log') || [];
+    logs.unshift(entry);
+    if (logs.length > 500) logs.splice(500);
+    L.set('audit_log', logs);
+    if (fbReady) {
+      try { await fsAdd(fsCol(db, 'audit_log'), entry); } catch {}
+    }
+  },
+  getAll() { return L.get('audit_log') || []; }
+};
+
+// ── 提醒系統 ──
+const Reminder = {
+  getAll() { return L.get('reminders') || []; },
+  add(r) {
+    const all = this.getAll();
+    all.push({ id: 'rem_' + Date.now(), ...r, createdAt: now(), done: false });
+    L.set('reminders', all);
+  },
+  dismiss(id) {
+    const all = this.getAll().map(r => r.id === id ? { ...r, done: true } : r);
+    L.set('reminders', all);
+  },
+  checkDue() {
+    const td = today();
+    return this.getAll().filter(r => !r.done && r.dueDate && r.dueDate <= td);
+  },
+  checkPeriodic() {
+    const td = today();
+    const all = this.getAll().filter(r => !r.done && r.periodic && r.nextDate && r.nextDate <= td);
+    all.forEach(r => {
+      const all2 = this.getAll();
+      const idx = all2.findIndex(x => x.id === r.id);
+      if (idx >= 0) {
+        const next = new Date(r.nextDate);
+        if (r.period === 'daily') next.setDate(next.getDate() + 1);
+        else if (r.period === 'weekly') next.setDate(next.getDate() + 7);
+        else if (r.period === 'monthly') next.setMonth(next.getMonth() + 1);
+        all2[idx].nextDate = next.toISOString().slice(0, 10);
+        L.set('reminders', all2);
+      }
+    });
+    return all;
+  }
+};
+
+setInterval(() => {
+  if (S.loading) return;
+  const due = [...Reminder.checkDue(), ...Reminder.checkPeriodic()];
+  due.forEach(r => toast(`⏰ 提醒：${r.title} (${r.dueDate})`, 6000));
+}, 60000);
+setTimeout(() => {
+  if (!S.loading) {
+    const due = Reminder.checkDue();
+    if (due.length) toast(`⏰ 您有 ${due.length} 個提醒到期`, 5000);
+  }
+}, 4000);
+
+// ════════════════════════════════════════════
+// 登入頁
+// ════════════════════════════════════════════
+function pgLogin() {
+  return `
+  <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--navy);padding:20px">
+    <div style="background:var(--card);border-radius:var(--r3);padding:32px;width:100%;max-width:380px;box-shadow:var(--sh2)">
+      <div style="text-align:center;margin-bottom:24px">
+        <div style="font-size:36px;margin-bottom:8px">📋</div>
+        <div style="font-size:22px;font-weight:700;color:var(--navy)">Form<span style="color:var(--blue)">Hub</span></div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px">電子簽核系統</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div>
+          <label style="font-size:12px;color:var(--text3);display:block;margin-bottom:4px">Email</label>
+          <input type="email" id="login-email" placeholder="your@company.com" style="width:100%">
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--text3);display:block;margin-bottom:4px">密碼</label>
+          <input type="password" id="login-pw" placeholder="••••••••" style="width:100%" onkeydown="if(event.key==='Enter')doLogin()">
+        </div>
+        <div id="login-err" style="font-size:12px;color:var(--red);display:none"></div>
+        <button class="btn pri lg w-full" onclick="doLogin()" style="justify-content:center;margin-top:4px">登入</button>
+        <button class="btn lg w-full" onclick="doGuestLogin()" style="justify-content:center">👤 訪客模式（Demo）</button>
+      </div>
+      <div style="text-align:center;margin-top:16px;font-size:11px;color:var(--text4)">
+        如需帳號請聯絡系統管理員
+      </div>
+    </div>
+  </div>`;
+}
+
+async function doLogin() {
+  const email = document.getElementById('login-email')?.value?.trim();
+  const pw = document.getElementById('login-pw')?.value;
+  const err = document.getElementById('login-err');
+  if (!email || !pw) { if (err) { err.textContent = '請填寫 Email 和密碼'; err.style.display = 'block'; } return; }
+  try {
+    if (window._fbSignIn) await window._fbSignIn(email, pw);
+    else { S.currentUser = { uid: 'demo', name: email.split('@')[0], email, role: 'admin' }; go('dashboard'); }
+  } catch(e) {
+    if (err) { err.textContent = '登入失敗：帳號或密碼錯誤'; err.style.display = 'block'; }
+  }
+}
+
+function doGuestLogin() {
+  S.currentUser = { uid: 'guest', name: '訪客', email: 'guest@demo.com', role: 'readonly' };
+  S.authReady = true;
+  go('dashboard');
+}
+
+// ════════════════════════════════════════════
+// 專案管理資料層
+// ════════════════════════════════════════════
+const ProjDB = {
+  getAll() { return L.get('projects') || []; },
+  save(p) {
+    const all = this.getAll();
+    const i = all.findIndex(x => x.id === p.id);
+    if (i >= 0) all[i] = p; else all.unshift(p);
+    L.set('projects', all);
+    if (fbReady) fsSet(fsDoc(db, 'projects', p.id), p).catch(() => {});
+    return p;
+  },
+  get(id) { return this.getAll().find(x => x.id === id); },
+  del(id) {
+    const all = this.getAll().filter(x => x.id !== id);
+    L.set('projects', all);
+  }
+};
+
+// ════════════════════════════════════════════
+// 看板 / 四種瀏覽模式
+// ════════════════════════════════════════════
+function pgKanban(deptId) {
+  const dept = deptOf(deptId || S.deptId || 'MGT');
+  const view = S.kanbanView || 'kanban';
+  const projects = ProjDB.getAll().filter(p => !deptId || p.deptId === deptId);
+  const cols = ['待辦', '進行中', '審核中', '已完成'];
+
+  return `
+  <div class="pg-hdr">
+    <div>
+      <div class="pg-title" style="color:${dept.color}">${dept.name} — 專案看板</div>
+      <div class="pg-sub">${projects.length} 個專案</div>
+    </div>
+    <div class="pg-sp"></div>
+    <div class="flex gap-2">
+      ${['list','kanban','calendar','timeline'].map(v => `
+        <button class="btn sm${view===v?' pri':''}" onclick="S.kanbanView='${v}';renderAll()">
+          ${{list:'≡ 列表',kanban:'⬛ 看板',calendar:'📅 行事曆',timeline:'📊 時間軸'}[v]}
+        </button>`).join('')}
+      <button class="btn sm pri" onclick="S.modal='new-project:${deptId||S.deptId}';renderAll()">＋ 新增專案</button>
+    </div>
+  </div>
+  ${view === 'kanban' ? renderKanbanView(projects, cols, deptId) : ''}
+  ${view === 'list'   ? renderListView(projects) : ''}
+  ${view === 'calendar' ? renderCalendarView(projects) : ''}
+  ${view === 'timeline' ? renderTimelineView(projects) : ''}`;
+}
+
+function renderKanbanView(projects, cols) {
+  return `
+  <div style="display:grid;grid-template-columns:repeat(${cols.length},minmax(220px,1fr));gap:12px;overflow-x:auto;padding-bottom:12px">
+    ${cols.map(col => {
+      const cards = projects.filter(p => (p.status || '待辦') === col);
+      return `
+      <div style="background:var(--bg2);border-radius:var(--r2);padding:10px;min-height:300px"
+           ondragover="event.preventDefault()" ondrop="dropCard(event,'${col}')">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <span style="font-size:12px;font-weight:600;color:var(--text2)">${col}</span>
+          <span style="font-size:10px;background:var(--bg3);padding:1px 7px;border-radius:99px">${cards.length}</span>
+        </div>
+        ${cards.map(p => renderKanbanCard(p)).join('')}
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+function renderKanbanCard(p) {
+  const priority = { 高: '#dc2626', 中: '#b45309', 低: '#15803d' };
+  const progress = p.tasks ? Math.round((p.tasks.filter(t => t.done).length / p.tasks.length) * 100) : 0;
+  return `
+  <div class="kanban-card" draggable="true"
+    ondragstart="S._dragId='${p.id}'"
+    onclick="S.modal='view-project:${p.id}';renderAll()"
+    style="background:var(--card);border-radius:var(--r);padding:10px 12px;margin-bottom:8px;cursor:pointer;border:1px solid var(--border);box-shadow:var(--sh);transition:transform .15s"
+    onmouseenter="this.style.transform='translateY(-2px)'" onmouseleave="this.style.transform=''">
+    <div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:6px">
+      ${p.priority ? `<span style="width:6px;height:6px;border-radius:50%;background:${priority[p.priority]||'#64748b'};flex-shrink:0;margin-top:5px"></span>` : ''}
+      <span style="font-size:12px;font-weight:600;flex:1;line-height:1.4">${p.name}</span>
+    </div>
+    ${p.desc ? `<div style="font-size:11px;color:var(--text3);margin-bottom:6px;line-height:1.4">${p.desc.slice(0,60)}${p.desc.length>60?'...':''}</div>` : ''}
+    ${p.tags ? `<div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:6px">${p.tags.map(t=>`<span style="font-size:10px;background:var(--blue-lt);color:var(--blue);padding:1px 6px;border-radius:99px">${t}</span>`).join('')}</div>` : ''}
+    ${p.tasks?.length ? `
+    <div style="margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text4);margin-bottom:3px">
+        <span>進度</span><span>${progress}%</span>
+      </div>
+      <div style="height:3px;background:var(--bg3);border-radius:99px">
+        <div style="height:3px;background:var(--blue);border-radius:99px;width:${progress}%"></div>
+      </div>
+    </div>` : ''}
+    <div style="display:flex;align-items:center;justify-content:space-between;font-size:10px;color:var(--text4)">
+      <span>${p.assignee || ''}</span>
+      ${p.endDate ? `<span style="color:${p.endDate<today()?'var(--red)':'var(--text4)'}">${p.endDate}</span>` : ''}
+    </div>
+  </div>`;
+}
+
+function dropCard(event, newStatus) {
+  const id = S._dragId; if (!id) return;
+  const p = ProjDB.get(id); if (!p) return;
+  p.status = newStatus;
+  ProjDB.save(p);
+  AuditLog.record('move_project', `移至${newStatus}`, id);
+  renderAll();
+}
+
+function renderListView(projects) {
+  return `
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead><tr><th>專案名稱</th><th>負責人</th><th>部門</th><th>狀態</th><th>優先級</th><th>開始</th><th>結束</th><th>進度</th><th></th></tr></thead>
+      <tbody>${projects.length === 0 ? `<tr><td colspan="9" style="text-align:center;padding:30px;color:var(--text4)">尚無專案</td></tr>` :
+        projects.map(p => {
+          const progress = p.tasks ? Math.round((p.tasks.filter(t => t.done).length / p.tasks.length) * 100) : 0;
+          return `<tr onclick="S.modal='view-project:${p.id}';renderAll()">
+            <td style="font-weight:500">${p.name}</td>
+            <td>${p.assignee || '-'}</td>
+            <td>${deptOf(p.deptId).name}</td>
+            <td><span class="badge ${p.status==='已完成'?'b-approved':p.status==='進行中'?'b-pending':'b-draft'}">${p.status||'待辦'}</span></td>
+            <td>${p.priority ? `<span style="color:${{高:'#dc2626',中:'#b45309',低:'#15803d'}[p.priority]}">${p.priority}</span>` : '-'}</td>
+            <td class="txt-xs txt-muted">${p.startDate||'-'}</td>
+            <td class="txt-xs txt-muted" style="color:${p.endDate&&p.endDate<today()?'var(--red)':'inherit'}">${p.endDate||'-'}</td>
+            <td style="min-width:80px">
+              <div style="display:flex;align-items:center;gap:6px">
+                <div style="flex:1;height:4px;background:var(--bg3);border-radius:99px">
+                  <div style="height:4px;background:var(--blue);border-radius:99px;width:${progress}%"></div>
+                </div>
+                <span class="txt-xs txt-muted">${progress}%</span>
+              </div>
+            </td>
+            <td><button class="btn sm" onclick="event.stopPropagation();S.modal='view-project:${p.id}';renderAll()">查看</button></td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+  </div>`;
+}
+
+function renderCalendarView(projects) {
+  const now2 = new Date();
+  const year = S.calYear || now2.getFullYear();
+  const month = S.calMonth !== undefined ? S.calMonth : now2.getMonth();
+  const first = new Date(year, month, 1);
+  const last = new Date(year, month + 1, 0);
+  const startDay = first.getDay();
+  const monthNames = ['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'];
+  const dayNames = ['日','一','二','三','四','五','六'];
+
+  // 收集本月有事件的日期
+  const evMap = {};
+  projects.forEach(p => {
+    [p.startDate, p.endDate, p.dueDate].filter(Boolean).forEach(d => {
+      if (d.startsWith(`${year}-${String(month+1).padStart(2,'0')}`)) {
+        const day = parseInt(d.split('-')[2]);
+        if (!evMap[day]) evMap[day] = [];
+        evMap[day].push(p);
+      }
+    });
+  });
+  // Reminders
+  Reminder.getAll().filter(r => !r.done && r.dueDate?.startsWith(`${year}-${String(month+1).padStart(2,'0')}`)).forEach(r => {
+    const day = parseInt(r.dueDate.split('-')[2]);
+    if (!evMap[day]) evMap[day] = [];
+    evMap[day].push({ name: r.title, _isReminder: true });
+  });
+
+  let cells = '';
+  const total = startDay + last.getDate();
+  for (let i = 0; i < Math.ceil(total / 7) * 7; i++) {
+    const dayNum = i - startDay + 1;
+    const isValid = dayNum >= 1 && dayNum <= last.getDate();
+    const isToday = isValid && `${year}-${String(month+1).padStart(2,'0')}-${String(dayNum).padStart(2,'0')}` === today();
+    const evs = evMap[dayNum] || [];
+    cells += `<td style="vertical-align:top;padding:4px;border:1px solid var(--border);min-height:70px;background:${isToday?'var(--blue-lt)':'var(--card)'};${!isValid?'background:var(--bg2);':''}" onclick="${isValid?`S.modal='add-project-date:${year}-${String(month+1).padStart(2,'0')}-${String(dayNum).padStart(2,'0')}';renderAll()`:''}">
+      <div style="font-size:11px;font-weight:${isToday?'700':'400'};color:${isToday?'var(--blue)':'var(--text3)'};margin-bottom:3px">${isValid?dayNum:''}</div>
+      ${evs.slice(0,2).map(ev=>`<div style="font-size:10px;padding:1px 5px;border-radius:3px;margin-bottom:2px;background:${ev._isReminder?'var(--amber-lt)':'var(--blue-lt)'};color:${ev._isReminder?'var(--amber)':'var(--blue)'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer">${ev.name}</div>`).join('')}
+      ${evs.length>2?`<div style="font-size:9px;color:var(--text4)">+${evs.length-2}</div>`:''}
+    </td>`;
+    if ((i + 1) % 7 === 0) cells += '</tr><tr>';
+  }
+
+  return `
+  <div style="background:var(--card);border-radius:var(--r2);border:1px solid var(--border);overflow:hidden">
+    <div style="display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);gap:12px">
+      <button class="btn sm ico" onclick="S.calMonth=${month===0?'(S.calYear='+(year-1)+',11)':'month-1'};renderAll()">←</button>
+      <span style="font-size:15px;font-weight:600;flex:1;text-align:center">${year} 年 ${monthNames[month]}</span>
+      <button class="btn sm ico" onclick="S.calMonth=${month===11?'(S.calYear='+(year+1)+',0)':'month+1'};renderAll()">→</button>
+      <button class="btn sm" onclick="S.calYear=${now2.getFullYear()};S.calMonth=${now2.getMonth()};renderAll()">今天</button>
+    </div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr>${dayNames.map(d=>`<th style="padding:8px;font-size:11px;color:var(--text3);font-weight:500;border:1px solid var(--border);text-align:center">${d}</th>`).join('')}</tr></thead>
+        <tbody><tr>${cells}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function renderTimelineView(projects) {
+  if (!projects.length) return `<div class="empty"><div class="empty-ic">📊</div>尚無專案資料</div>`;
+  const allDates = projects.flatMap(p => [p.startDate, p.endDate].filter(Boolean)).sort();
+  if (!allDates.length) return `<div class="empty"><div class="empty-ic">📊</div>專案尚未設定日期</div>`;
+  const minD = new Date(allDates[0]);
+  const maxD = new Date(allDates[allDates.length - 1]);
+  maxD.setDate(maxD.getDate() + 7);
+  const totalDays = Math.max(1, Math.round((maxD - minD) / 86400000));
+
+  const pct = d => Math.max(0, Math.min(100, Math.round((new Date(d) - minD) / 86400000 / totalDays * 100)));
+  const width = d1 => d1 ? Math.max(2, pct(d1) - pct(projects[0]?.startDate)) : 5;
+  const colorMap = { '待辦': 'var(--gray)', '進行中': 'var(--blue)', '審核中': 'var(--amber)', '已完成': 'var(--green)' };
+
+  return `
+  <div style="background:var(--card);border-radius:var(--r2);border:1px solid var(--border);overflow:hidden">
+    <div style="display:flex;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);gap:8px;flex-wrap:wrap">
+      <span style="font-size:13px;font-weight:600">📊 時間軸</span>
+      <span class="txt-xs txt-muted">${allDates[0]} ~ ${maxD.toISOString().slice(0,10)}</span>
+    </div>
+    <div style="padding:14px;overflow-x:auto">
+      <div style="min-width:600px">
+        ${projects.map(p => {
+          const left = p.startDate ? pct(p.startDate) : 0;
+          const right = p.endDate ? pct(p.endDate) : left + 5;
+          const barW = Math.max(2, right - left);
+          const progress = p.tasks ? (p.tasks.filter(t=>t.done).length/p.tasks.length*100) : 0;
+          return `
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;min-height:36px">
+            <div style="width:140px;flex-shrink:0;font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;color:var(--text)" onclick="S.modal='view-project:${p.id}';renderAll()" title="${p.name}">${p.name}</div>
+            <div style="flex:1;position:relative;height:28px;background:var(--bg2);border-radius:var(--r)">
+              <div style="position:absolute;left:${left}%;width:${barW}%;min-width:4px;height:100%;background:${colorMap[p.status]||'var(--blue)'};border-radius:var(--r);cursor:pointer;overflow:hidden;transition:opacity .2s;display:flex;align-items:center;padding:0 6px"
+                onclick="S.modal='view-project:${p.id}';renderAll()"
+                onmouseenter="this.style.opacity='.8'" onmouseleave="this.style.opacity='1'">
+                ${progress > 0 ? `<div style="position:absolute;left:0;top:0;height:100%;width:${progress}%;background:rgba(0,0,0,.2);border-radius:var(--r)"></div>` : ''}
+                <span style="font-size:10px;color:#fff;position:relative;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${barW > 8 ? p.name : ''}</span>
+              </div>
+              <div style="position:absolute;right:0;top:50%;transform:translateY(-50%);font-size:10px;color:var(--text4);padding-right:4px">${p.endDate||''}</div>
+            </div>
+          </div>`;
+        }).join('')}
+        <div style="position:relative;height:20px;margin-top:8px;margin-left:150px">
+          <div style="position:absolute;left:0%;font-size:10px;color:var(--text4)">${allDates[0]}</div>
+          <div style="position:absolute;left:50%;transform:translateX(-50%);font-size:10px;color:var(--text4)">${new Date((minD.getTime()+maxD.getTime())/2).toISOString().slice(0,10)}</div>
+          <div style="position:absolute;right:0;font-size:10px;color:var(--text4)">${maxD.toISOString().slice(0,10)}</div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════
+// 甘特圖（拖拉式）
+// ════════════════════════════════════════════
+function pgGantt(deptId) {
+  const projects = ProjDB.getAll().filter(p => !deptId || p.deptId === (deptId || S.deptId));
+  const allTasks = projects.flatMap(p => (p.tasks || []).map(t => ({ ...t, projectName: p.name, projectId: p.id })));
+
+  if (!allTasks.length) return `
+    <div class="pg-hdr"><div class="pg-title">📊 甘特圖</div><div class="pg-sp"></div>
+      <button class="btn pri" onclick="S.modal='new-project:${deptId||S.deptId}';renderAll()">＋ 新增專案</button>
+    </div>
+    <div class="empty"><div class="empty-ic">📊</div>尚無任務資料<br><span class="txt-sm">請先建立專案並新增任務</span></div>`;
+
+  const allDates = allTasks.flatMap(t => [t.startDate, t.endDate].filter(Boolean)).sort();
+  if (!allDates.length) return `<div class="empty"><div class="empty-ic">📊</div>任務尚未設定日期</div>`;
+
+  const minD = new Date(allDates[0]);
+  minD.setDate(minD.getDate() - 2);
+  const maxD = new Date(allDates[allDates.length - 1]);
+  maxD.setDate(maxD.getDate() + 7);
+  const totalDays = Math.max(1, Math.round((maxD - minD) / 86400000));
+  const pct = d => Math.max(0, Math.min(100, (new Date(d) - minD) / 86400000 / totalDays * 100));
+  const barW = (d1, d2) => d1 && d2 ? Math.max(0.5, pct(d2) - pct(d1)) : 3;
+
+  const statusColor = { '待辦': '#94a3b8', '進行中': '#2563eb', '已完成': '#15803d', '延遲': '#dc2626' };
+
+  // Build week headers
+  const weeks = [];
+  const cur = new Date(minD);
+  while (cur <= maxD) {
+    weeks.push(`${cur.getMonth()+1}/${cur.getDate()}`);
+    cur.setDate(cur.getDate() + 7);
+  }
+
+  return `
+  <div class="pg-hdr">
+    <div><div class="pg-title">📊 甘特圖</div><div class="pg-sub">${allTasks.length} 個任務</div></div>
+    <div class="pg-sp"></div>
+    <button class="btn sm" onclick="S.kanbanView='kanban';S.page='kanban';renderAll()">← 回看板</button>
+    <button class="btn pri sm" onclick="S.modal='new-project:${deptId||S.deptId||'RD'}';renderAll()">＋ 新增專案</button>
+  </div>
+  <div style="background:var(--card);border-radius:var(--r2);border:1px solid var(--border);overflow:hidden">
+    <div style="overflow-x:auto">
+      <div style="min-width:800px">
+        <!-- Header -->
+        <div style="display:flex;border-bottom:1px solid var(--border);background:var(--bg2)">
+          <div style="width:200px;flex-shrink:0;padding:8px 12px;font-size:11px;font-weight:600;color:var(--text3);border-right:1px solid var(--border)">任務</div>
+          <div style="flex:1;position:relative;height:32px">
+            ${weeks.map((w, i) => `<div style="position:absolute;left:${i/weeks.length*100}%;font-size:10px;color:var(--text4);padding:10px 4px;border-left:1px solid var(--border);height:100%">${w}</div>`).join('')}
+          </div>
+        </div>
+        <!-- Tasks -->
+        ${allTasks.map((task, idx) => {
+          const left = task.startDate ? pct(task.startDate) : 0;
+          const w = task.startDate && task.endDate ? barW(task.startDate, task.endDate) : 3;
+          const color = statusColor[task.status] || '#2563eb';
+          const progress = task.progress || 0;
+          const isOverdue = task.endDate && task.endDate < today() && task.status !== '已完成';
+          return `
+          <div style="display:flex;border-bottom:1px solid var(--border);min-height:36px;${idx%2===1?'background:var(--bg)':''}"
+               id="gantt-row-${task.id}">
+            <div style="width:200px;flex-shrink:0;padding:6px 12px;border-right:1px solid var(--border);display:flex;align-items:center;gap:6px">
+              <span style="font-size:11px;color:${isOverdue?'var(--red)':'var(--text)'};">${task.name}</span>
+              ${isOverdue?'<span style="font-size:9px;color:var(--red)">⚠️</span>':''}
+            </div>
+            <div style="flex:1;position:relative;display:flex;align-items:center;padding:4px 0"
+                 ondragover="event.preventDefault()"
+                 ondrop="ganttDrop(event,'${task.id}','${task.projectId}',${totalDays})">
+              <!-- Today line -->
+              <div style="position:absolute;left:${pct(today())}%;top:0;bottom:0;width:1px;background:var(--red);opacity:.4;pointer-events:none"></div>
+              <!-- Bar -->
+              <div id="gantt-bar-${task.id}"
+                   draggable="true"
+                   ondragstart="ganttDragStart(event,'${task.id}','${task.projectId}')"
+                   style="position:absolute;left:${left}%;width:${w}%;min-width:8px;height:22px;background:${color};border-radius:4px;cursor:grab;display:flex;align-items:center;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.15)"
+                   title="${task.name} ${task.startDate||''}~${task.endDate||''}"
+                   onclick="S.modal='edit-task:${task.projectId}:${task.id}';renderAll()">
+                <div style="position:absolute;left:0;top:0;height:100%;width:${progress}%;background:rgba(255,255,255,.3)"></div>
+                <span style="font-size:10px;color:#fff;padding:0 6px;position:relative;white-space:nowrap;overflow:hidden">${w > 5 ? task.name : ''}</span>
+                <!-- Resize handle -->
+                <div style="position:absolute;right:0;top:0;bottom:0;width:6px;cursor:ew-resize;background:rgba(0,0,0,.2)" onmousedown="ganttResizeStart(event,'${task.id}','${task.projectId}')"></div>
+              </div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+  </div>
+  <div class="txt-xs txt-muted mt-1" style="padding:4px 8px">💡 拖拉任務條可移動日期，拖拉右側把手可調整結束日</div>`;
+}
+
+let _ganttDragTask = null, _ganttDragX = 0;
+function ganttDragStart(event, taskId, projId) {
+  _ganttDragTask = { taskId, projId };
+  _ganttDragX = event.clientX;
+}
+function ganttDrop(event, taskId, projId, totalDays) {
+  if (!_ganttDragTask || _ganttDragTask.taskId !== taskId) return;
+  const bar = document.getElementById('gantt-bar-' + taskId);
+  const row = document.getElementById('gantt-row-' + taskId);
+  if (!bar || !row) return;
+  const dx = event.clientX - _ganttDragX;
+  const rowW = row.getBoundingClientRect().width - 200;
+  const daysDelta = Math.round(dx / rowW * totalDays);
+  if (daysDelta === 0) return;
+  const proj = ProjDB.get(projId);
+  if (!proj) return;
+  const task = (proj.tasks || []).find(t => t.id === taskId);
+  if (!task) return;
+  if (task.startDate) {
+    const d = new Date(task.startDate);
+    d.setDate(d.getDate() + daysDelta);
+    task.startDate = d.toISOString().slice(0, 10);
+  }
+  if (task.endDate) {
+    const d = new Date(task.endDate);
+    d.setDate(d.getDate() + daysDelta);
+    task.endDate = d.toISOString().slice(0, 10);
+  }
+  ProjDB.save(proj);
+  AuditLog.record('move_task', `任務${task.name}移動${daysDelta}天`, projId);
+  renderAll();
+  toast(`✓ 任務已移動 ${daysDelta > 0 ? '+' : ''}${daysDelta} 天`);
+}
+function ganttResizeStart(event, taskId, projId) {
+  event.stopPropagation(); event.preventDefault();
+  const startX = event.clientX;
+  const proj = ProjDB.get(projId);
+  const task = (proj?.tasks || []).find(t => t.id === taskId);
+  if (!task) return;
+  const bar = document.getElementById('gantt-bar-' + taskId);
+  const startW = bar ? parseFloat(bar.style.width) : 10;
+  function onMove(e) {
+    const dx = e.clientX - startX;
+    const totalDays = 90;
+    const daysDelta = Math.round(dx / (bar?.parentElement?.offsetWidth || 600) * totalDays);
+    if (task.endDate) {
+      const d = new Date(task.endDate);
+      d.setDate(d.getDate() + daysDelta);
+      if (bar) bar.style.width = Math.max(2, startW + dx / (bar.parentElement?.offsetWidth || 600) * 100) + '%';
+    }
+  }
+  function onUp(e) {
+    const dx = e.clientX - startX;
+    const totalDays = 90;
+    const rowW = bar?.parentElement?.offsetWidth || 600;
+    const daysDelta = Math.round(dx / rowW * totalDays);
+    if (task.endDate && daysDelta !== 0) {
+      const d = new Date(task.endDate);
+      d.setDate(d.getDate() + daysDelta);
+      task.endDate = d.toISOString().slice(0, 10);
+      ProjDB.save(proj);
+      renderAll();
+      toast(`✓ 結束日調整至 ${task.endDate}`);
+    }
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+// ════════════════════════════════════════════
+// 心智圖
+// ════════════════════════════════════════════
+function pgMindMap(mapId) {
+  const maps = L.get('mindmaps') || {};
+  const map = mapId ? (maps[mapId] || { id: mapId, name: '新心智圖', nodes: [{ id: 'root', text: '核心主題', x: 400, y: 250, children: [] }] }) : null;
+
+  if (!map) {
+    const allMaps = Object.values(maps);
+    return `
+    <div class="pg-hdr">
+      <div class="pg-title">🧠 心智圖</div>
+      <div class="pg-sp"></div>
+      <button class="btn pri" onclick="createMindMap()">＋ 新建心智圖</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px">
+      ${allMaps.length === 0 ? `<div class="empty" style="grid-column:1/-1"><div class="empty-ic">🧠</div>尚無心智圖</div>` :
+        allMaps.map(m => `
+        <div style="background:var(--card);border:1px solid var(--border);border-radius:var(--r2);padding:16px;cursor:pointer;transition:box-shadow .15s"
+             onclick="S.mindMapId='${m.id}';S.page='mindmap';renderAll()"
+             onmouseenter="this.style.boxShadow='var(--sh2)'" onmouseleave="this.style.boxShadow=''">
+          <div style="font-size:32px;margin-bottom:8px">🧠</div>
+          <div style="font-size:13px;font-weight:600">${m.name}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:4px">${m.updatedAt||''}</div>
+          <div style="display:flex;gap:6px;margin-top:10px">
+            <button class="btn sm pri" onclick="event.stopPropagation();S.mindMapId='${m.id}';S.page='mindmap';renderAll()">開啟</button>
+            <button class="btn sm dan" onclick="event.stopPropagation();deleteMindMap('${m.id}')">刪除</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  }
+
+  return `
+  <div class="pg-hdr">
+    <span class="pg-back" onclick="S.mindMapId=null;S.page='mindmap-list';renderAll()">← 返回</span>
+    <input type="text" value="${map.name}" style="font-size:16px;font-weight:700;border:none;background:transparent;color:var(--text);width:200px" onchange="renameMindMap('${map.id}',this.value)">
+    <div class="pg-sp"></div>
+    <button class="btn sm" onclick="exportMindMap('${map.id}')">🖼️ 匯出圖片</button>
+    <button class="btn sm pri" onclick="saveMindMap('${map.id}')">💾 儲存</button>
+  </div>
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:var(--r2);overflow:hidden">
+    <canvas id="mindmap-canvas" width="900" height="500" style="width:100%;cursor:move;touch-action:none"></canvas>
+  </div>
+  <div style="display:flex;gap:8px;padding:8px;flex-wrap:wrap">
+    <button class="btn sm" onclick="mmAddNode('${map.id}')">➕ 新增節點</button>
+    <button class="btn sm" onclick="mmAutoLayout('${map.id}')">🔄 自動排列</button>
+    <div class="txt-xs txt-muted" style="display:flex;align-items:center">💡 點擊節點編輯，雙擊新增子節點，拖拉移動</div>
+  </div>
+  <script>setTimeout(()=>initMindMap('${map.id}'),50)<\/script>`;
+}
+
+function createMindMap() {
+  const id = 'mm_' + Date.now();
+  const maps = L.get('mindmaps') || {};
+  maps[id] = { id, name: '新心智圖 ' + Object.keys(maps).length, updatedAt: today(), nodes: [{ id: 'n0', text: '核心主題', x: 400, y: 250, color: '#2563eb', children: [] }] };
+  L.set('mindmaps', maps);
+  S.mindMapId = id; S.page = 'mindmap';
+  renderAll();
+}
+function deleteMindMap(id) {
+  if (!confirm('確定刪除此心智圖？')) return;
+  const maps = L.get('mindmaps') || {};
+  delete maps[id];
+  L.set('mindmaps', maps);
+  renderAll();
+}
+function renameMindMap(id, name) {
+  const maps = L.get('mindmaps') || {};
+  if (maps[id]) { maps[id].name = name; L.set('mindmaps', maps); }
+}
+function saveMindMap(id) {
+  const maps = L.get('mindmaps') || {};
+  if (maps[id]) { maps[id].updatedAt = today(); L.set('mindmaps', maps); toast('✓ 心智圖已儲存'); }
+}
+function exportMindMap(id) {
+  const canvas = document.getElementById('mindmap-canvas');
+  if (!canvas) return;
+  const a = document.createElement('a');
+  a.download = `mindmap_${id}.png`;
+  a.href = canvas.toDataURL();
+  a.click();
+  toast('✓ 已匯出為圖片');
+}
+
+function initMindMap(mapId) {
+  const canvas = document.getElementById('mindmap-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const maps = L.get('mindmaps') || {};
+  const map = maps[mapId];
+  if (!map) return;
+
+  let nodes = map.nodes || [];
+  let selected = null, dragging = null, dragOffX = 0, dragOffY = 0;
+  const colors = ['#2563eb','#7c3aed','#0f766e','#9f1239','#b45309','#15803d'];
+
+  function draw() {
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--card').trim() || '#fff';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw connections
+    function drawConnections(node) {
+      (node.children || []).forEach(childId => {
+        const child = nodes.find(n => n.id === childId);
+        if (!child) return;
+        ctx.beginPath();
+        ctx.moveTo(node.x, node.y);
+        const cpx = (node.x + child.x) / 2;
+        ctx.bezierCurveTo(cpx, node.y, cpx, child.y, child.x, child.y);
+        ctx.strokeStyle = node.color || '#2563eb';
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        drawConnections(child);
+      });
+    }
+    nodes.forEach(n => drawConnections(n));
+
+    // Draw nodes
+    nodes.forEach(n => {
+      const isRoot = n.id === 'n0' || n.id === 'root';
+      const r = isRoot ? 50 : 40;
+      const text = n.text || '節點';
+      ctx.font = `${isRoot ? 'bold ' : ''}${isRoot ? 14 : 12}px 'Noto Sans TC', sans-serif`;
+      const tw = ctx.measureText(text).width;
+      const bw = Math.max(r * 2, tw + 24);
+
+      ctx.beginPath();
+      ctx.roundRect(n.x - bw/2, n.y - 18, bw, 36, 8);
+      ctx.fillStyle = selected === n.id ? (n.color || colors[0]) : (n.color || colors[0]) + '22';
+      ctx.fill();
+      ctx.strokeStyle = n.color || colors[0];
+      ctx.lineWidth = selected === n.id ? 2.5 : 1.5;
+      ctx.stroke();
+
+      ctx.fillStyle = selected === n.id ? '#fff' : (n.color || colors[0]);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text.slice(0, 12), n.x, n.y);
+    });
+  }
+
+  function getNodeAt(x, y) {
+    return nodes.find(n => {
+      const text = n.text || '節點';
+      ctx.font = '12px Noto Sans TC, sans-serif';
+      const bw = Math.max(80, ctx.measureText(text).width + 24);
+      return Math.abs(x - n.x) < bw/2 && Math.abs(y - n.y) < 18;
+    });
+  }
+
+  canvas.addEventListener('mousedown', e => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+    const node = getNodeAt(x, y);
+    if (node) {
+      selected = node.id;
+      dragging = node;
+      dragOffX = x - node.x;
+      dragOffY = y - node.y;
+    } else {
+      selected = null;
+    }
+    draw();
+  });
+
+  canvas.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    dragging.x = (e.clientX - rect.left) * scaleX - dragOffX;
+    dragging.y = (e.clientY - rect.top) * scaleY - dragOffY;
+    draw();
+  });
+
+  canvas.addEventListener('mouseup', () => {
+    if (dragging) {
+      const maps2 = L.get('mindmaps') || {};
+      if (maps2[mapId]) { maps2[mapId].nodes = nodes; L.set('mindmaps', maps2); }
+    }
+    dragging = null;
+  });
+
+  canvas.addEventListener('dblclick', e => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+    const node = getNodeAt(x, y);
+    if (node) {
+      const text = prompt('編輯節點文字：', node.text);
+      if (text !== null) {
+        node.text = text;
+        const maps2 = L.get('mindmaps') || {};
+        if (maps2[mapId]) { maps2[mapId].nodes = nodes; L.set('mindmaps', maps2); }
+        draw();
+      }
+    } else {
+      const parentNode = selected ? nodes.find(n => n.id === selected) : nodes[0];
+      if (parentNode) {
+        const text = prompt('新節點文字：', '新節點');
+        if (text) {
+          const angle = Math.random() * Math.PI * 2;
+          const dist = 150 + Math.random() * 80;
+          const newNode = { id: 'n' + Date.now(), text, x: parentNode.x + Math.cos(angle) * dist, y: parentNode.y + Math.sin(angle) * dist, color: colors[Math.floor(Math.random() * colors.length)], children: [] };
+          nodes.push(newNode);
+          if (!parentNode.children) parentNode.children = [];
+          parentNode.children.push(newNode.id);
+          const maps2 = L.get('mindmaps') || {};
+          if (maps2[mapId]) { maps2[mapId].nodes = nodes; L.set('mindmaps', maps2); }
+          draw();
+        }
+      }
+    }
+  });
+
+  window.mmAddNode = (mid) => {
+    const parentNode = selected ? nodes.find(n => n.id === selected) : nodes[0];
+    if (!parentNode) return;
+    const text = prompt('新節點文字：', '新節點');
+    if (!text) return;
+    const angle = Math.random() * Math.PI * 2;
+    const newNode = { id: 'n' + Date.now(), text, x: parentNode.x + Math.cos(angle) * 140, y: parentNode.y + Math.sin(angle) * 140, color: colors[Math.floor(Math.random() * colors.length)], children: [] };
+    nodes.push(newNode);
+    if (!parentNode.children) parentNode.children = [];
+    parentNode.children.push(newNode.id);
+    saveMindMapNodes(mid, nodes);
+    draw();
+  };
+
+  window.mmAutoLayout = (mid) => {
+    const root = nodes.find(n => n.id === 'n0' || n.id === 'root') || nodes[0];
+    if (!root) return;
+    root.x = canvas.width / 2; root.y = canvas.height / 2;
+    function layout(node, angle, dist, spread) {
+      (node.children || []).forEach((cid, i) => {
+        const child = nodes.find(n => n.id === cid);
+        if (!child) return;
+        const a = angle - spread/2 + spread * (i + 0.5) / Math.max(1, node.children.length);
+        child.x = node.x + Math.cos(a) * dist;
+        child.y = node.y + Math.sin(a) * dist;
+        layout(child, a, dist * 0.7, spread * 0.6);
+      });
+    }
+    layout(root, 0, 160, Math.PI * 2);
+    saveMindMapNodes(mid, nodes);
+    draw();
+    toast('✓ 自動排列完成');
+  };
+
+  function saveMindMapNodes(mid, nodes) {
+    const maps2 = L.get('mindmaps') || {};
+    if (maps2[mid]) { maps2[mid].nodes = nodes; L.set('mindmaps', maps2); }
+  }
+
+  draw();
+}
+
+// ════════════════════════════════════════════
+// 個人行事曆
+// ════════════════════════════════════════════
+function pgPersonalCalendar() {
+  const myForms = S.forms.filter(f => f.applicant === S.currentUser.name);
+  const pendingForms = S.forms.filter(f => f.status === 'pending');
+  const reminders = Reminder.getAll().filter(r => !r.done);
+  const projects = ProjDB.getAll();
+  const myTasks = projects.flatMap(p => (p.tasks || []).filter(t => t.assignee === S.currentUser.name).map(t => ({ ...t, projectName: p.name })));
+
+  const now2 = new Date();
+  const year = S.calYear || now2.getFullYear();
+  const month = S.calMonth !== undefined ? S.calMonth : now2.getMonth();
+  const first = new Date(year, month, 1);
+  const last = new Date(year, month + 1, 0);
+  const startDay = first.getDay();
+  const monthNames = ['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'];
+  const dayNames = ['日','一','二','三','四','五','六'];
+
+  const evMap = {};
+  const addEv = (d, ev) => { if (!d) return; const key = d.slice(0, 10); if (!evMap[key]) evMap[key] = []; evMap[key].push(ev); };
+  myForms.forEach(f => addEv(f.date, { text: f.seq, color: 'var(--blue)', type: 'form' }));
+  pendingForms.forEach(f => addEv(f.date, { text: '待審:' + f.seq, color: 'var(--amber)', type: 'pending' }));
+  reminders.forEach(r => addEv(r.dueDate, { text: r.title, color: 'var(--red)', type: 'reminder' }));
+  myTasks.forEach(t => { addEv(t.endDate, { text: t.name, color: 'var(--purple)', type: 'task' }); });
+
+  let cells = '';
+  const total = startDay + last.getDate();
+  for (let i = 0; i < Math.ceil(total / 7) * 7; i++) {
+    const dayNum = i - startDay + 1;
+    const isValid = dayNum >= 1 && dayNum <= last.getDate();
+    const dateStr = isValid ? `${year}-${String(month+1).padStart(2,'0')}-${String(dayNum).padStart(2,'0')}` : '';
+    const isToday = dateStr === today();
+    const evs = evMap[dateStr] || [];
+    cells += `<td style="vertical-align:top;padding:3px;border:1px solid var(--border);min-height:72px;background:${isToday?'var(--blue-lt)':isValid?'var(--card)':'var(--bg2)'}">
+      <div style="font-size:10px;font-weight:${isToday?'700':'400'};color:${isToday?'var(--blue)':'var(--text3)'};margin-bottom:2px;text-align:right">${isValid?dayNum:''}</div>
+      ${evs.slice(0,3).map(ev=>`<div style="font-size:9px;padding:1px 4px;border-radius:2px;margin-bottom:1px;background:${ev.color}22;color:${ev.color};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ev.text}</div>`).join('')}
+      ${evs.length>3?`<div style="font-size:9px;color:var(--text4)">+${evs.length-3}</div>`:''}
+    </td>`;
+    if ((i + 1) % 7 === 0) cells += '</tr><tr>';
+  }
+
+  return `
+  <div class="pg-hdr">
+    <div><div class="pg-title">📅 個人行事曆</div><div class="pg-sub">${S.currentUser.name}</div></div>
+    <div class="pg-sp"></div>
+    <button class="btn sm pri" onclick="S.modal='add-reminder';renderAll()">＋ 新增提醒</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat" style="border-left:3px solid var(--blue)"><div class="stat-v" style="color:var(--blue)">${myForms.length}</div><div class="stat-l">我的表單</div></div>
+    <div class="stat" style="border-left:3px solid var(--amber)"><div class="stat-v" style="color:var(--amber)">${pendingForms.length}</div><div class="stat-l">待我審核</div></div>
+    <div class="stat" style="border-left:3px solid var(--purple)"><div class="stat-v" style="color:var(--purple)">${myTasks.length}</div><div class="stat-l">我的任務</div></div>
+    <div class="stat" style="border-left:3px solid var(--red)"><div class="stat-v" style="color:var(--red)">${reminders.length}</div><div class="stat-l">提醒事項</div></div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 260px;gap:14px">
+    <div style="background:var(--card);border-radius:var(--r2);border:1px solid var(--border);overflow:hidden">
+      <div style="display:flex;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);gap:10px">
+        <button class="btn sm ico" onclick="S.calMonth=${month===0?'(S.calYear='+(year-1)+',11)':'month-1'};renderAll()">←</button>
+        <span style="font-size:14px;font-weight:600;flex:1;text-align:center">${year} 年 ${monthNames[month]}</span>
+        <button class="btn sm ico" onclick="S.calMonth=${month===11?'(S.calYear='+(year+1)+',0)':'month+1'};renderAll()">→</button>
+        <button class="btn sm" onclick="S.calYear=${now2.getFullYear()};S.calMonth=${now2.getMonth()};renderAll()">今天</button>
+      </div>
+      <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">
+        <thead><tr>${dayNames.map(d=>`<th style="padding:6px;font-size:10px;color:var(--text3);border:1px solid var(--border);text-align:center">${d}</th>`).join('')}</tr></thead>
+        <tbody><tr>${cells}</tbody>
+      </table></div>
+    </div>
+    <div>
+      <div class="sec">
+        <div class="sec-hdr red">⏰ 提醒事項</div>
+        <div class="sec-body" style="padding:8px">
+          ${reminders.length===0?'<div class="txt-muted txt-xs">無提醒</div>':
+            reminders.slice(0,8).map(r=>`
+            <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+              <span style="font-size:12px">${r.periodic?'🔁':'🔔'}</span>
+              <div style="flex:1">
+                <div style="font-size:12px;font-weight:500">${r.title}</div>
+                <div style="font-size:10px;color:${r.dueDate&&r.dueDate<=today()?'var(--red)':'var(--text3)'}">${r.dueDate||''} ${r.periodic?'('+r.period+')':''}</div>
+              </div>
+              <button class="btn sm" style="padding:2px 6px;font-size:10px" onclick="Reminder.dismiss('${r.id}');renderAll()">✓</button>
+            </div>`).join('')}
+          <button class="btn sm w-full mt-1" onclick="S.modal='add-reminder';renderAll()">＋ 新增提醒</button>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-hdr purple">✅ 我的任務</div>
+        <div class="sec-body" style="padding:8px">
+          ${myTasks.length===0?'<div class="txt-muted txt-xs">無任務</div>':
+            myTasks.slice(0,5).map(t=>`
+            <div style="padding:5px 0;border-bottom:1px solid var(--border)">
+              <div style="font-size:12px">${t.name}</div>
+              <div style="font-size:10px;color:var(--text3)">${t.projectName} · ${t.endDate||'-'}</div>
+            </div>`).join('')}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════
+// 供應商管理
+// ════════════════════════════════════════════
+const VendorDB = {
+  getAll() { return L.get('vendors') || []; },
+  save(v) {
+    const all = this.getAll();
+    const i = all.findIndex(x => x.id === v.id);
+    if (i >= 0) all[i] = v; else all.unshift(v);
+    L.set('vendors', all);
+    if (fbReady) fsSet(fsDoc(db, 'vendors', v.id), v).catch(() => {});
+    return v;
+  },
+  get(id) { return this.getAll().find(x => x.id === id); },
+  genPortalToken(vendorId) {
+    const token = btoa(vendorId + ':' + Date.now() + ':' + Math.random().toString(36).slice(2));
+    const tokens = L.get('vendor_tokens') || {};
+    tokens[token] = { vendorId, createdAt: now(), used: 0, expires: new Date(Date.now() + 30*86400000).toISOString().slice(0,10) };
+    L.set('vendor_tokens', tokens);
+    return token;
+  }
+};
+
+function pgVendorMgr() {
+  const vendors = VendorDB.getAll();
+  const gradeColor = { A: '#15803d', B: '#b45309', C: '#dc2626' };
+
+  return `
+  <div class="pg-hdr">
+    <div><div class="pg-title">🏭 供應商管理</div><div class="pg-sub">${vendors.length} 家供應商</div></div>
+    <div class="pg-sp"></div>
+    <button class="btn sm" onclick="S.modal='vendor-portal-settings';renderAll()">🔗 外部入口設定</button>
+    <button class="btn pri" onclick="S.modal='new-vendor';renderAll()">＋ 新增供應商</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat" style="border-left:3px solid var(--green)"><div class="stat-v" style="color:var(--green)">${vendors.filter(v=>v.grade==='A').length}</div><div class="stat-l">A 級供應商</div></div>
+    <div class="stat" style="border-left:3px solid var(--amber)"><div class="stat-v" style="color:var(--amber)">${vendors.filter(v=>v.grade==='B').length}</div><div class="stat-l">B 級供應商</div></div>
+    <div class="stat" style="border-left:3px solid var(--red)"><div class="stat-v" style="color:var(--red)">${vendors.filter(v=>v.status==='停用').length}</div><div class="stat-l">停用</div></div>
+    <div class="stat" style="border-left:3px solid var(--blue)"><div class="stat-v" style="color:var(--blue)">${vendors.filter(v=>v.contractExpiry&&v.contractExpiry<new Date(Date.now()+30*86400000).toISOString().slice(0,10)).length}</div><div class="stat-l">合約即將到期</div></div>
+  </div>
+
+  ${vendors.filter(v=>v.contractExpiry&&v.contractExpiry<new Date(Date.now()+30*86400000).toISOString().slice(0,10)).length?`
+  <div class="sec">
+    <div class="sec-hdr wine">⚠️ 合約即將到期（30天內）</div>
+    <div class="sec-body">
+      ${vendors.filter(v=>v.contractExpiry&&v.contractExpiry<new Date(Date.now()+30*86400000).toISOString().slice(0,10)).map(v=>`
+      <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)">
+        <span class="badge b-pending" style="flex-shrink:0">${v.grade||'-'}</span>
+        <span style="font-size:13px;font-weight:500;flex:1">${v.name}</span>
+        <span style="font-size:12px;color:var(--red)">${v.contractExpiry} 到期</span>
+        <button class="btn sm" onclick="sendVendorReminder('${v.id}')">發提醒</button>
+      </div>`).join('')}
+    </div>
+  </div>`:'' }
+
+  <div class="sec">
+    <div class="sec-hdr navy">📋 供應商列表</div>
+    <div class="sec-body" style="padding:0">
+      ${vendors.length===0?`<div class="empty"><div class="empty-ic">🏭</div>尚無供應商資料</div>`:`
+      <div class="tbl-wrap" style="border:none;border-radius:0">
+        <table class="tbl">
+          <thead><tr><th>公司名稱</th><th>聯絡人</th><th>電話</th><th>等級</th><th>合約到期</th><th>狀態</th><th></th></tr></thead>
+          <tbody>${vendors.map(v=>`<tr onclick="S.modal='view-vendor:${v.id}';renderAll()">
+            <td style="font-weight:500">${v.name}</td>
+            <td>${v.contact||'-'}</td>
+            <td class="txt-xs">${v.phone||'-'}</td>
+            <td><span style="font-weight:700;color:${gradeColor[v.grade]||'var(--text3)'}">${v.grade||'-'}</span></td>
+            <td class="txt-xs" style="color:${v.contractExpiry&&v.contractExpiry<today()?'var(--red)':'inherit'}">${v.contractExpiry||'-'}</td>
+            <td><span class="badge ${v.status==='啟用'?'b-approved':'b-rejected'}">${v.status||'啟用'}</span></td>
+            <td style="display:flex;gap:4px">
+              <button class="btn sm" onclick="event.stopPropagation();genVendorPortalLink('${v.id}')">🔗 入口</button>
+              <button class="btn sm" onclick="event.stopPropagation();S.modal='view-vendor:${v.id}';renderAll()">查看</button>
+            </td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>`}
+    </div>
+  </div>`;
+}
+
+function genVendorPortalLink(vendorId) {
+  const v = VendorDB.get(vendorId); if (!v) return;
+  const token = VendorDB.genPortalToken(vendorId);
+  const link = `${window.location.origin}${window.location.pathname}?vendor_token=${token}`;
+  navigator.clipboard?.writeText(link).then(() => toast('✓ 供應商入口連結已複製！'));
+  S.modal = `vendor-link:${link}`;
+  renderAll();
+}
+
+async function sendVendorReminder(vendorId) {
+  const v = VendorDB.get(vendorId); if (!v) return;
+  toast(`已發送合約到期提醒給 ${v.name}（透過 n8n）`);
+  const cfg = IntegCfg.get().n8n;
+  if (cfg.enabled) {
+    try {
+      await fetch(`${cfg.baseUrl}${cfg.webhookPath}/vendor-reminder`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vendorId, vendorName: v.name, vendorEmail: v.email, contractExpiry: v.contractExpiry }) });
+    } catch {}
+  }
+}
+
+// ── 供應商入口（外部填表頁面） ──
+function pgVendorPortal(token) {
+  const tokens = L.get('vendor_tokens') || {};
+  const tokenData = tokens[token];
+  if (!tokenData || tokenData.expires < today()) {
+    return `<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);padding:20px">
+      <div style="text-align:center;max-width:400px">
+        <div style="font-size:48px;margin-bottom:16px">⚠️</div>
+        <div style="font-size:18px;font-weight:600;margin-bottom:8px">連結已失效</div>
+        <div style="font-size:13px;color:var(--text3)">此連結已過期或無效，請聯繫採購人員重新取得連結。</div>
+      </div>
+    </div>`;
+  }
+  const vendor = VendorDB.get(tokenData.vendorId);
+  return `
+  <div style="min-height:100vh;background:var(--bg);padding:20px">
+    <div style="max-width:700px;margin:0 auto">
+      <div style="background:var(--navy);color:#fff;border-radius:var(--r2);padding:20px 24px;margin-bottom:20px;display:flex;align-items:center;gap:16px">
+        <div style="font-size:32px">🏭</div>
+        <div>
+          <div style="font-size:18px;font-weight:700">供應商資料填寫入口</div>
+          <div style="font-size:12px;opacity:.7;margin-top:4px">ESUSE 採購部 · 請填寫完整資料後提交</div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-hdr wine">📋 基本資料</div>
+        <div class="sec-body">
+          <div class="fg">
+            <label class="fl req">公司名稱</label><input type="text" id="vp-name" value="${vendor?.name||''}">
+            <label class="fl req">統一編號</label><input type="text" id="vp-tax" value="${vendor?.taxId||''}">
+            <label class="fl req">聯絡人</label><input type="text" id="vp-contact" value="${vendor?.contact||''}">
+            <label class="fl req">電話</label><input type="tel" id="vp-phone" value="${vendor?.phone||''}">
+            <label class="fl">Email</label><input type="email" id="vp-email" value="${vendor?.email||''}">
+            <label class="fl">地址</label><input type="text" id="vp-addr" value="${vendor?.address||''}">
+            <label class="fl">產業別</label><input type="text" id="vp-industry" value="${vendor?.industry||''}">
+            <label class="fl">付款條件</label>
+            <select id="vp-payment"><option>月結30天</option><option>月結60天</option><option>即期</option><option>預付</option></select>
+          </div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-hdr olive">📁 文件上傳</div>
+        <div class="sec-body">
+          <div class="fg">
+            <label class="fl">公司登記證</label>
+            <label class="btn sm" style="cursor:pointer">選擇檔案<input type="file" accept=".pdf,.jpg,.png" style="display:none" onchange="vpUpload(this,'reg')"></label>
+            <label class="fl">ISO 認證</label>
+            <label class="btn sm" style="cursor:pointer">選擇檔案<input type="file" accept=".pdf,.jpg,.png" style="display:none" onchange="vpUpload(this,'iso')"></label>
+            <label class="fl">銀行帳戶</label>
+            <label class="btn sm" style="cursor:pointer">選擇檔案<input type="file" accept=".pdf,.jpg,.png" style="display:none" onchange="vpUpload(this,'bank')"></label>
+          </div>
+          <div id="vp-files" style="margin-top:10px;font-size:12px;color:var(--text3)"></div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-hdr teal">💬 備註</div>
+        <div class="sec-body">
+          <textarea id="vp-note" placeholder="其他說明..." style="min-height:80px"></textarea>
+        </div>
+      </div>
+      <button class="btn pri lg w-full" onclick="submitVendorPortal('${token}')" style="justify-content:center">📤 提交資料</button>
+      <div style="text-align:center;font-size:11px;color:var(--text4);margin-top:12px">提交後採購人員將審核您的資料，通過後會以 Email 通知</div>
+    </div>
+  </div>`;
+}
+
+const vpFiles = {};
+function vpUpload(inp, key) {
+  const file = inp.files[0]; if (!file) return;
+  fileToDataURL(file).then(url => {
+    vpFiles[key] = { name: file.name, url };
+    const el = document.getElementById('vp-files');
+    if (el) el.innerHTML = Object.entries(vpFiles).map(([k, f]) => `<div>✓ ${k}: ${f.name}</div>`).join('');
+    toast(`✓ ${file.name} 已上傳`);
+  });
+}
+
+async function submitVendorPortal(token) {
+  const name = document.getElementById('vp-name')?.value?.trim();
+  if (!name) { toast('請填寫公司名稱'); return; }
+  const data = {
+    id: 'vendor_' + Date.now(), token,
+    name, taxId: document.getElementById('vp-tax')?.value || '',
+    contact: document.getElementById('vp-contact')?.value || '',
+    phone: document.getElementById('vp-phone')?.value || '',
+    email: document.getElementById('vp-email')?.value || '',
+    address: document.getElementById('vp-addr')?.value || '',
+    industry: document.getElementById('vp-industry')?.value || '',
+    payment: document.getElementById('vp-payment')?.value || '',
+    note: document.getElementById('vp-note')?.value || '',
+    files: vpFiles, status: '待審核', grade: 'C',
+    submittedAt: now(), submittedVia: 'portal'
+  };
+  VendorDB.save(data);
+  // 透過 n8n 通知採購
+  const cfg = IntegCfg.get().n8n;
+  if (cfg.enabled) {
+    try { await fetch(`${cfg.baseUrl}${cfg.webhookPath}/vendor-submit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }); } catch {}
+  }
+  AuditLog.record('vendor_submit', `供應商 ${name} 提交資料`, data.id);
+  document.querySelector('.pg-hdr')?.parentElement?.scrollTo(0, 0);
+  toast('✅ 資料已提交，感謝您！採購人員將盡快審核', 5000);
+  renderAll();
+}
+
+// ════════════════════════════════════════════
+// 圖片 AI 視覺辨識
+// ════════════════════════════════════════════
+async function aiVisionFill(imageDataURL, targetForm) {
+  const dept = S.depts.find(d => d.id === (targetForm === 'new' ? (S.aiDept || S.deptId) : S.forms.find(f=>f.id===targetForm)?.deptId));
+  const fieldList = (dept?.fields || []).map(f => `${f.label}(${f.type})`).join('、');
+  const sys = `你是表單辨識助手。分析圖片中的內容，辨識所有文字和數據，自動對應到以下表單欄位：${fieldList}。
+同時辨識圖片中的品項表格（品名、數量、單位、單價）。
+只回傳JSON：{"fields":{"欄位名稱":"值"},"items":[{"name":"","qty":1,"unit":"個","price":0}],"applicant":"","_summary":"一句話摘要","_ok":true}`;
+  toast('🤖 AI 視覺辨識中...', 8000);
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514', max_tokens: 1500, system: sys,
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageDataURL.split(',')[1] || imageDataURL } },
+          { type: 'text', text: '請辨識此圖片中的表單資料並填入對應欄位' }
+        ]}]
+      })
+    });
+    const data = await r.json();
+    const parsed = JSON.parse(data.content?.[0]?.text?.replace(/```json\n?|\n?```/g, '').trim() || '{}');
+    // 填入欄位
+    if (parsed.fields) {
+      Object.entries(parsed.fields).forEach(([label, val]) => {
+        const fd = dept?.fields?.find(f => f.label === label);
+        if (fd) {
+          const prefix = targetForm === 'new' ? 'nf-' : 'ef-';
+          const el = document.getElementById(prefix + fd.id);
+          if (el) el.value = val;
+        }
+      });
+    }
+    if (parsed.applicant) {
+      const el = document.getElementById('inp-applicant');
+      if (el) el.value = parsed.applicant;
+    }
+    // 填入品項
+    if (parsed.items?.length) {
+      S.aiParsed = { ...S.aiParsed, items: parsed.items, _ok: true, _summary: parsed._summary };
+      renderAll();
+    }
+    toast(`✅ AI 辨識完成：${parsed._summary || '已填入欄位'}`);
+    return parsed;
+  } catch(e) {
+    toast('❌ AI 辨識失敗：' + e.message, 4000);
+    return null;
+  }
+}
+
+// ── 在圖片上傳時加入 AI 辨識按鈕 ──
+const _handlePhotoUploadBase = handlePhotoUpload;
+async function handlePhotoUpload(inp) {
+  for (const file of inp.files) {
+    const url = await fileToDataURL(file);
+    photoBuf.push(url);
+    addPhotoPreview(url);
+    // 加入 AI 辨識按鈕
+    const preview = document.getElementById('photo-preview');
+    if (preview) {
+      const btn = document.createElement('button');
+      btn.className = 'btn sm pri'; btn.style.cssText = 'align-self:center;margin-top:4px';
+      btn.textContent = '🤖 AI 辨識'; btn.onclick = () => aiVisionFill(url, 'new');
+      preview.appendChild(btn);
+    }
+  }
+}
+
+// ── 貼上截圖也加入 AI 辨識 ──
+window.addEventListener('paste', e => {
+  if (S.page !== 'new-form' && S.page !== 'edit-form') return;
+  const items = e.clipboardData?.items; if (!items) return;
+  for (const it of items) {
+    if (it.type.startsWith('image/')) {
+      const file = it.getAsFile();
+      fileToDataURL(file).then(url => {
+        photoBuf.push(url);
+        addPhotoPreview(url);
+        toast('📋 截圖已加入 — 可點 AI 辨識自動填表');
+        // 自動觸發 AI 辨識
+        setTimeout(() => aiVisionFill(url, 'new'), 300);
+      });
+    }
+  }
+}, true);
+
+// ════════════════════════════════════════════
+// 專案 Modal（新增/查看）
+// ════════════════════════════════════════════
+const _renderModalBase = renderModal;
+function renderModal() {
+  if (S.modal === 'add-reminder') return `
+    <div class="moverlay" onclick="if(event.target===this){S.modal=null;renderAll()}">
+      <div class="modal">
+        <h3>⏰ 新增提醒</h3>
+        <div class="fg">
+          <label class="fl req">提醒標題</label><input type="text" id="rem-title" placeholder="到期提醒...">
+          <label class="fl req">到期日</label><input type="date" id="rem-date" value="${today()}">
+          <label class="fl">週期性</label>
+          <select id="rem-period">
+            <option value="">不重複</option><option value="daily">每天</option>
+            <option value="weekly">每週</option><option value="monthly">每月</option>
+          </select>
+          <label class="fl">說明</label><textarea id="rem-note" style="min-height:60px"></textarea>
+        </div>
+        <div class="modal-ft">
+          <button class="btn" onclick="S.modal=null;renderAll()">取消</button>
+          <button class="btn pri" onclick="saveReminder()">新增</button>
+        </div>
+      </div>
+    </div>`;
+
+  if (S.modal?.startsWith('new-project:')) {
+    const deptId = S.modal.split(':')[1];
+    return `
+    <div class="moverlay" onclick="if(event.target===this){S.modal=null;renderAll()}">
+      <div class="modal" style="max-width:560px">
+        <h3>➕ 新增專案</h3>
+        <div class="fg">
+          <label class="fl req">專案名稱</label><input type="text" id="pj-name" placeholder="專案名稱">
+          <label class="fl">描述</label><textarea id="pj-desc" style="min-height:60px" placeholder="專案說明..."></textarea>
+          <label class="fl">負責人</label><input type="text" id="pj-assignee" value="${S.currentUser.name}">
+          <label class="fl">優先級</label>
+          <select id="pj-priority"><option>高</option><option selected>中</option><option>低</option></select>
+          <label class="fl">開始日</label><input type="date" id="pj-start" value="${today()}">
+          <label class="fl">結束日</label><input type="date" id="pj-end">
+          <label class="fl">標籤</label><input type="text" id="pj-tags" placeholder="標籤1,標籤2">
+        </div>
+        <div class="modal-ft">
+          <button class="btn" onclick="S.modal=null;renderAll()">取消</button>
+          <button class="btn pri" onclick="saveProject('${deptId}')">新增</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  if (S.modal?.startsWith('view-project:')) {
+    const projId = S.modal.split(':')[1];
+    const p = ProjDB.get(projId);
+    if (!p) return '';
+    const tasks = p.tasks || [];
+    const progress = tasks.length ? Math.round(tasks.filter(t=>t.done).length/tasks.length*100) : 0;
+    return `
+    <div class="moverlay" onclick="if(event.target===this){S.modal=null;renderAll()}">
+      <div class="modal" style="max-width:600px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+          <h3 style="flex:1;margin:0">${p.name}</h3>
+          <span class="badge ${p.status==='已完成'?'b-approved':p.status==='進行中'?'b-pending':'b-draft'}">${p.status||'待辦'}</span>
+        </div>
+        ${p.desc?`<p style="font-size:13px;color:var(--text2);margin-bottom:12px">${p.desc}</p>`:''}
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;font-size:12px">
+          <div><span class="txt-muted">負責人：</span>${p.assignee||'-'}</div>
+          <div><span class="txt-muted">優先級：</span>${p.priority||'-'}</div>
+          <div><span class="txt-muted">開始：</span>${p.startDate||'-'}</div>
+          <div><span class="txt-muted">結束：</span>${p.endDate||'-'}</div>
+        </div>
+        ${tasks.length?`
+        <div style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-bottom:4px">
+            <span>進度</span><span>${progress}%</span>
+          </div>
+          <div style="height:6px;background:var(--bg3);border-radius:99px">
+            <div style="height:6px;background:var(--blue);border-radius:99px;width:${progress}%"></div>
+          </div>
+        </div>`:''}
+        <div style="margin-bottom:12px">
+          <div style="font-size:12px;font-weight:600;margin-bottom:6px">任務清單</div>
+          ${tasks.map((t,i)=>`
+          <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
+            <input type="checkbox" ${t.done?'checked':''} onchange="toggleTask('${p.id}','${t.id}',this.checked)">
+            <span style="flex:1;font-size:12px;${t.done?'text-decoration:line-through;color:var(--text4)':''}">${t.name}</span>
+            <span style="font-size:10px;color:var(--text4)">${t.assignee||''}</span>
+            <span style="font-size:10px;color:${t.endDate&&t.endDate<today()&&!t.done?'var(--red)':'var(--text4)'}">${t.endDate||''}</span>
+          </div>`).join('')}
+          <button class="btn sm mt-1" onclick="addTask('${p.id}')">+ 新增任務</button>
+        </div>
+        <div class="modal-ft">
+          <button class="btn dan sm" onclick="if(confirm('確定刪除？')){ProjDB.del('${p.id}');S.modal=null;renderAll();toast('已刪除')}">刪除</button>
+          <button class="btn sm" onclick="S.page='gantt';S.modal=null;renderAll()">📊 甘特圖</button>
+          <button class="btn pri" onclick="S.modal=null;renderAll()">關閉</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  if (S.modal === 'new-vendor') return `
+    <div class="moverlay" onclick="if(event.target===this){S.modal=null;renderAll()}">
+      <div class="modal" style="max-width:520px">
+        <h3>🏭 新增供應商</h3>
+        <div class="fg">
+          <label class="fl req">公司名稱</label><input type="text" id="v-name" placeholder="公司全名">
+          <label class="fl">統一編號</label><input type="text" id="v-tax">
+          <label class="fl req">聯絡人</label><input type="text" id="v-contact">
+          <label class="fl">電話</label><input type="tel" id="v-phone">
+          <label class="fl">Email</label><input type="email" id="v-email">
+          <label class="fl">產業別</label><input type="text" id="v-industry">
+          <label class="fl">合約到期</label><input type="date" id="v-expiry">
+          <label class="fl">等級</label>
+          <select id="v-grade"><option>A</option><option selected>B</option><option>C</option></select>
+          <label class="fl">付款條件</label>
+          <select id="v-payment"><option>月結30天</option><option>月結60天</option><option>即期</option></select>
+        </div>
+        <div class="modal-ft">
+          <button class="btn" onclick="S.modal=null;renderAll()">取消</button>
+          <button class="btn pri" onclick="saveVendor()">新增</button>
+        </div>
+      </div>
+    </div>`;
+
+  if (S.modal?.startsWith('view-vendor:')) {
+    const v = VendorDB.get(S.modal.split(':')[1]);
+    if (!v) return '';
+    const docs = S.forms.filter(f => f.deptId === 'PUR' && f.fields?.f1 === v.name);
+    return `
+    <div class="moverlay" onclick="if(event.target===this){S.modal=null;renderAll()}">
+      <div class="modal" style="max-width:560px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+          <h3 style="flex:1;margin:0">🏭 ${v.name}</h3>
+          <span class="badge ${v.status==='啟用'?'b-approved':'b-rejected'}">${v.status||'啟用'}</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;margin-bottom:14px">
+          <div><span class="txt-muted">統編：</span>${v.taxId||'-'}</div>
+          <div><span class="txt-muted">等級：</span><strong>${v.grade||'-'}</strong></div>
+          <div><span class="txt-muted">聯絡人：</span>${v.contact||'-'}</div>
+          <div><span class="txt-muted">電話：</span>${v.phone||'-'}</div>
+          <div><span class="txt-muted">Email：</span>${v.email||'-'}</div>
+          <div><span class="txt-muted">付款條件：</span>${v.payment||'-'}</div>
+          <div><span class="txt-muted">合約到期：</span><span style="color:${v.contractExpiry&&v.contractExpiry<today()?'var(--red)':'inherit'}">${v.contractExpiry||'-'}</span></div>
+          <div><span class="txt-muted">產業：</span>${v.industry||'-'}</div>
+        </div>
+        <div style="font-size:12px;font-weight:600;margin-bottom:6px">往來採購單（${docs.length} 筆）</div>
+        ${docs.slice(0,5).map(f=>`<div style="display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);font-size:12px"><span class="mono">${f.seq}</span><span class="badge ${statusCls(f.status)}">${statusLabel(f.status)}</span><span class="txt-muted txt-xs">${f.date}</span></div>`).join('')}
+        <div class="modal-ft">
+          <button class="btn sm" onclick="genVendorPortalLink('${v.id}')">🔗 產生入口連結</button>
+          <button class="btn sm" onclick="sendVendorReminder('${v.id}')">📧 發提醒</button>
+          <button class="btn pri" onclick="S.modal=null;renderAll()">關閉</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  if (S.modal?.startsWith('vendor-link:')) {
+    const link = S.modal.replace('vendor-link:', '');
+    return `
+    <div class="moverlay" onclick="if(event.target===this){S.modal=null;renderAll()}">
+      <div class="modal" style="max-width:480px">
+        <h3>🔗 供應商入口連結</h3>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:12px">將以下連結傳給供應商，他們可以直接填寫並上傳文件（有效期30天）：</p>
+        <div style="background:var(--bg2);border-radius:var(--r);padding:10px;font-size:11px;font-family:var(--mono);word-break:break-all;margin-bottom:12px">${link}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn pri" onclick="navigator.clipboard?.writeText('${link}').then(()=>toast('✓ 已複製'))">📋 複製連結</button>
+          <button class="btn" onclick="window.open('${link}','_blank')">🔍 預覽</button>
+          <button class="btn" onclick="S.modal=null;renderAll()">關閉</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  return _renderModalBase();
+}
+
+function saveReminder() {
+  const title = document.getElementById('rem-title')?.value?.trim();
+  const dueDate = document.getElementById('rem-date')?.value;
+  const period = document.getElementById('rem-period')?.value;
+  const note = document.getElementById('rem-note')?.value;
+  if (!title || !dueDate) { toast('請填寫標題和日期'); return; }
+  Reminder.add({ title, dueDate, periodic: !!period, period, nextDate: dueDate, note });
+  S.modal = null; toast('✓ 提醒已新增'); renderAll();
+}
+
+function saveProject(deptId) {
+  const name = document.getElementById('pj-name')?.value?.trim();
+  if (!name) { toast('請填寫專案名稱'); return; }
+  const tagsRaw = document.getElementById('pj-tags')?.value || '';
+  const proj = {
+    id: 'pj_' + Date.now(), deptId: deptId || S.deptId || 'MGT', name,
+    desc: document.getElementById('pj-desc')?.value || '',
+    assignee: document.getElementById('pj-assignee')?.value || S.currentUser.name,
+    priority: document.getElementById('pj-priority')?.value || '中',
+    startDate: document.getElementById('pj-start')?.value || today(),
+    endDate: document.getElementById('pj-end')?.value || '',
+    tags: tagsRaw ? tagsRaw.split(',').map(t => t.trim()) : [],
+    status: '待辦', tasks: [], createdAt: now(), createdBy: S.currentUser.name
+  };
+  ProjDB.save(proj);
+  AuditLog.record('create_project', `建立專案：${name}`, proj.id);
+  S.modal = null; toast('✓ 專案已建立'); renderAll();
+}
+
+function addTask(projId) {
+  const name = prompt('任務名稱：'); if (!name?.trim()) return;
+  const assignee = prompt('負責人：', S.currentUser.name) || S.currentUser.name;
+  const endDate = prompt('截止日 (YYYY-MM-DD)：', '') || '';
+  const proj = ProjDB.get(projId); if (!proj) return;
+  if (!proj.tasks) proj.tasks = [];
+  proj.tasks.push({ id: 't_' + Date.now(), name: name.trim(), assignee, endDate, done: false, progress: 0, status: '待辦' });
+  ProjDB.save(proj);
+  renderAll();
+}
+
+function toggleTask(projId, taskId, done) {
+  const proj = ProjDB.get(projId); if (!proj) return;
+  const task = (proj.tasks || []).find(t => t.id === taskId);
+  if (task) { task.done = done; task.status = done ? '已完成' : '進行中'; ProjDB.save(proj); }
+  renderAll();
+}
+
+function saveVendor() {
+  const name = document.getElementById('v-name')?.value?.trim();
+  if (!name) { toast('請填寫公司名稱'); return; }
+  const v = {
+    id: 'v_' + Date.now(), name,
+    taxId: document.getElementById('v-tax')?.value || '',
+    contact: document.getElementById('v-contact')?.value || '',
+    phone: document.getElementById('v-phone')?.value || '',
+    email: document.getElementById('v-email')?.value || '',
+    industry: document.getElementById('v-industry')?.value || '',
+    contractExpiry: document.getElementById('v-expiry')?.value || '',
+    grade: document.getElementById('v-grade')?.value || 'B',
+    payment: document.getElementById('v-payment')?.value || '月結30天',
+    status: '啟用', createdAt: now()
+  };
+  VendorDB.save(v);
+  AuditLog.record('create_vendor', `新增供應商：${name}`, v.id);
+  S.modal = null; toast('✓ 供應商已新增'); renderAll();
+}
+
+// ════════════════════════════════════════════
+// 路由擴充
+// ════════════════════════════════════════════
+const __renderPageExt2 = renderPageExtended;
+function renderPageExtended() {
+  // 供應商入口 (外部)
+  const params = new URLSearchParams(window.location.search);
+  const vtoken = params.get('vendor_token');
+  if (vtoken) return pgVendorPortal(vtoken);
+  // 登入
+  if (S.page === 'login') return pgLogin();
+  switch (S.page) {
+    case 'kanban':      return pgKanban(S.deptId);
+    case 'gantt':       return pgGantt(S.deptId);
+    case 'personal-cal': return pgPersonalCalendar();
+    case 'mindmap':     return pgMindMap(S.mindMapId);
+    case 'mindmap-list': return pgMindMap(null);
+    case 'vendors':     return pgVendorMgr();
+    case 'audit-log':   return pgAuditLog();
+    default:            return __renderPageExt2();
+  }
+}
+
+// ── 稽核日誌頁面 ──
+function pgAuditLog() {
+  const logs = AuditLog.getAll().slice(0, 100);
+  return `
+  <div class="pg-hdr">
+    <div><div class="pg-title">📜 操作稽核日誌</div><div class="pg-sub">${logs.length} 筆最近記錄</div></div>
+    <div class="pg-sp"></div>
+    <button class="btn sm" onclick="exportAuditLog()">📥 匯出</button>
+  </div>
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead><tr><th>時間</th><th>操作人</th><th>動作</th><th>說明</th><th>相關表單</th></tr></thead>
+      <tbody>${logs.length===0?`<tr><td colspan="5" style="text-align:center;padding:30px;color:var(--text4)">尚無記錄</td></tr>`:
+        logs.map(l=>`<tr>
+          <td class="txt-xs txt-muted">${l.time}</td>
+          <td style="font-size:12px">${l.user}</td>
+          <td><span class="badge b-blue" style="font-size:10px">${l.action}</span></td>
+          <td style="font-size:12px">${l.detail}</td>
+          <td class="mono">${l.formId||'-'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+  </div>`;
+}
+
+function exportAuditLog() {
+  const logs = AuditLog.getAll();
+  const rows = [['時間','操作人','動作','說明','相關單號']];
+  logs.forEach(l => rows.push([l.time, l.user, l.action, l.detail, l.formId || '']));
+  const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = `audit_log_${today()}.csv`; a.click();
+  toast('✓ 稽核日誌已匯出');
+}
+
+// ── Sidebar 最終版（含所有新功能） ──
+function renderSidebar() {
+  const p = myPending().length, dr = myDraft().length, ov = overdue().length;
+  const mailDue = Object.values(AutoFollow?.getAll?.()??{}).filter(v=>!v.done&&v.followDate&&v.followDate<=today()).length;
+  const remDue = Reminder.checkDue().length;
+  return `
+    <div class="sb-sec">
+      <div class="sb-lbl">工作匣</div>
+      <div class="sb-item${S.page==='dashboard'?' on':''}" onclick="go('dashboard');S.sidebarOpen=false;renderAll()"><span class="si">🏠</span>我的首頁</div>
+      <div class="sb-item${S.page==='pending'?' on':''}" onclick="goSb('pending');S.sidebarOpen=false;renderAll()"><span class="si">📥</span>等待我處理${p?`<span class="sb-badge">${p}</span>`:'<span class="sb-badge gray">0</span>'}</div>
+      <div class="sb-item${S.page==='sent'?' on':''}" onclick="goSb('sent');S.sidebarOpen=false;renderAll()"><span class="si">📤</span>我送出的簽核</div>
+      <div class="sb-item${S.page==='drafts'?' on':''}" onclick="goSb('drafts');S.sidebarOpen=false;renderAll()"><span class="si">📝</span>草稿匣${dr?`<span class="sb-badge amber">${dr}</span>`:''}</div>
+      <div class="sb-item${S.page==='approved-list'?' on':''}" onclick="goSb('approved-list');S.sidebarOpen=false;renderAll()"><span class="si">✅</span>簽核記錄</div>
+      <div class="sb-item${S.page==='archive'?' on':''}" onclick="goSb('archive');S.sidebarOpen=false;renderAll()"><span class="si">🗄</span>歸檔匣</div>
+      <div class="sb-item${S.page==='all-forms'?' on':''}" onclick="goSb('all-forms');S.sidebarOpen=false;renderAll()"><span class="si">📋</span>系統所有文件</div>
+      <div class="sb-item${S.page==='overdue'?' on':''}" onclick="goSb('overdue');S.sidebarOpen=false;renderAll()"><span class="si">⏰</span>逾期統計${ov?`<span class="sb-badge">${ov}</span>`:''}</div>
+    </div>
+    <div class="sb-divider"></div>
+    <div class="sb-sec">
+      <div class="sb-lbl">專案管理</div>
+      <div class="sb-item${S.page==='kanban'?' on':''}" onclick="S.page='kanban';S.sidebarOpen=false;renderAll()"><span class="si">⬛</span>看板/列表/行事曆</div>
+      <div class="sb-item${S.page==='gantt'?' on':''}" onclick="S.page='gantt';S.sidebarOpen=false;renderAll()"><span class="si">📊</span>甘特圖</div>
+      <div class="sb-item${S.page==='personal-cal'?' on':''}" onclick="S.page='personal-cal';S.sidebarOpen=false;renderAll()"><span class="si">📅</span>個人行事曆${remDue?`<span class="sb-badge amber">${remDue}</span>`:''}</div>
+      <div class="sb-item${S.page==='mindmap-list'?' on':''}" onclick="S.page='mindmap-list';S.sidebarOpen=false;renderAll()"><span class="si">🧠</span>心智圖</div>
+    </div>
+    <div class="sb-divider"></div>
+    <div class="sb-sec">
+      <div class="sb-lbl">功能</div>
+      <div class="sb-item${S.page==='crm'?' on':''}" onclick="S.page='crm';S.sidebarOpen=false;renderAll()"><span class="si">👥</span>CRM 客戶管理</div>
+      <div class="sb-item${S.page==='vendors'?' on':''}" onclick="S.page='vendors';S.sidebarOpen=false;renderAll()"><span class="si">🏭</span>供應商管理</div>
+      <div class="sb-item${S.page==='mail-mgr'?' on':''}" onclick="S.page='mail-mgr';S.sidebarOpen=false;renderAll()"><span class="si">📧</span>郵件管理${mailDue?`<span class="sb-badge amber">${mailDue}</span>`:''}</div>
+      <div class="sb-item${S.page==='8d'?' on':''}" onclick="S.page='8d';S.formId=null;S.sidebarOpen=false;renderAll()"><span class="si">📊</span>8D 報告</div>
+      <div class="sb-item${S.page==='file-import'?' on':''}" onclick="S.page='file-import';S.sidebarOpen=false;renderAll()"><span class="si">📁</span>檔案匯入</div>
+    </div>
+    <div class="sb-divider"></div>
+    <div class="sb-sec">
+      <div class="sb-lbl">部門</div>
+      ${S.depts.map(d=>`
+      <div class="sb-item${S.deptId===d.id&&S.page==='list'?' on':''}" onclick="goDept('${d.id}');S.sidebarOpen=false;renderAll()">
+        <span class="si" style="color:${d.color}">■</span>${d.name}
+        <span class="sb-badge gray" style="font-size:9px">${S.forms.filter(f=>f.deptId===d.id).length}</span>
+      </div>`).join('')}
+    </div>
+    <div class="sb-divider"></div>
+    <div class="sb-sec">
+      <div class="sb-lbl">系統</div>
+      <div class="sb-item${S.page==='settings'?' on':''}" onclick="go('settings');S.sidebarOpen=false;renderAll()"><span class="si">⚙️</span>表單設定</div>
+      <div class="sb-item${S.page==='integ-settings'?' on':''}" onclick="S.page='integ-settings';S.sidebarOpen=false;renderAll()"><span class="si">🔌</span>整合設定</div>
+      <div class="sb-item${S.page==='api-mgr'?' on':''}" onclick="go('api-mgr');S.sidebarOpen=false;renderAll()"><span class="si">🔗</span>API 管理</div>
+      <div class="sb-item${S.page==='audit-log'?' on':''}" onclick="S.page='audit-log';S.sidebarOpen=false;renderAll()"><span class="si">📜</span>稽核日誌</div>
+      ${S.currentUser?.name?`<div class="sb-item" onclick="if(window._fbSignOut){window._fbSignOut()}else{S.page='login';S.currentUser={name:'',role:''};renderAll()}"><span class="si">🚪</span>登出 (${S.currentUser.name})</div>`:''}
+    </div>`;
+}
+
+// ── 更新行動導覽列 ──
+function renderMobileNav() {
+  return `
+    <div class="mn-item${S.page==='dashboard'?' on':''}" onclick="go('dashboard')"><span class="mn-ic">🏠</span>首頁</div>
+    <div class="mn-item${S.page==='pending'?' on':''}" onclick="goSb('pending')"><span class="mn-ic">📥</span>待審</div>
+    <div class="mn-add" onclick="go('new-form')">＋</div>
+    <div class="mn-item${S.page==='kanban'?' on':''}" onclick="S.page='kanban';renderAll()"><span class="mn-ic">⬛</span>看板</div>
+    <div class="mn-item${S.page==='personal-cal'?' on':''}" onclick="S.page='personal-cal';renderAll()"><span class="mn-ic">📅</span>日曆</div>`;
+}
+
+// ── 部門頁面加入看板入口 ──
+const __pgListBase = pgList;
+function pgList(opts = {}) {
+  const base = __pgListBase(opts);
+  if (S.deptId && !opts.statusFilter && !opts.myOnly) {
+    return base.replace('</div>', `
+      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+        <button class="btn sm${S.kanbanView==='kanban'?'':''}" onclick="S.page='kanban';renderAll()">⬛ 切換看板視圖</button>
+        <button class="btn sm" onclick="S.page='gantt';renderAll()">📊 甘特圖</button>
+        <button class="btn sm" onclick="S.modal='new-project:${S.deptId}';renderAll()">＋ 新增專案</button>
+      </div>
+    `) + '</div>';
+  }
+  return base;
+}
+
+// ── 記錄操作到稽核日誌 ──
+const __doSaveBase = doSave;
+async function doSave(status) {
+  await __doSaveBase(status);
+  AuditLog.record(status === 'pending' ? 'submit_form' : 'create_draft', `建立表單 狀態:${status}`, '');
+}
+
+const __doApproveBase = doApprove;
+async function doApprove(id) {
+  await __doApproveBase(id);
+  AuditLog.record('approve_form', `審核表單`, id);
+}
+
+// ── URL 路由：處理 vendor_token ──
+(function checkVendorToken() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('vendor_token')) {
+    S.page = 'vendor-portal';
+  }
+})();
+
+console.log('✅ FormHub 完整最終版已載入 — 第一+二+三階段');
+console.log('🔖 版本功能：登入/權限/甘特圖(拖拉)/看板/行事曆/時間軸/心智圖/供應商管理/外部入口/AI視覺辨識/提醒系統/稽核日誌');
+
+
