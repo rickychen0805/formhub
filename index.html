@@ -990,6 +990,7 @@ body {
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js"></script>
 
 <script>
 /* ==================================================================
@@ -1380,6 +1381,10 @@ function toast(msg, type) {
 // ========== RENDER ENGINE ==========
 let _lastHash = {};
 function renderAll(force) {
+  if (_rafPending && !force) {
+    renderAllOptimized(force);
+    return;
+  }
   renderHeader();
   renderDeptTabs();
   renderSidebar();
@@ -1500,7 +1505,7 @@ function renderSidebar() {
     <div class="sidebar-section">
       <div class="sidebar-section-title">功能</div>
       <div class="sidebar-item ${S.currentPage === 'all-forms' ? 'active' : ''}" onclick="navigate('all-forms')">
-        ${icon('fileText')}<span class="sidebar-label">所有表單</span>
+        ${icon('fileText')}<span class="sidebar-label">系統所有文件</span>
       </div>
       <div class="sidebar-item ${S.currentPage === 'templates' ? 'active' : ''}" onclick="navigate('templates')">
         ${icon('clipboard')}<span class="sidebar-label">表單範本庫</span>
@@ -1597,6 +1602,7 @@ function renderContent() {
 function renderPage(page) {
   switch (page) {
     case 'dashboard': return pageDashboard();
+    case 'dept-home': return pageDeptHome();
     case 'notifications': return pageNotifications();
     case 'pending': return pageFormList('pending');
     case 'my-sent': return pageFormList('my-sent');
@@ -1618,6 +1624,10 @@ function renderPage(page) {
     case 'suppliers': return pageSuppliers();
     case 'iso-docs': return pageIsoDocs();
     case 'mes': return pageMES();
+    case 'process-routes': return pageProcessRoutes();
+    case 'production-report': return pageProductionReport();
+    case 'subscribers': return pageSubscribers();
+    case 'api-management': return pageApiManagement();
     case 'security': return pageSecurityDashboard();
     case 'product-dev': return pageProductDev();
     case 'quote-pipeline': return pageQuotePipeline();
@@ -1648,7 +1658,7 @@ function renderMobileNav() {
     <div class="mobile-nav-item" onclick="navigate('new-form')">
       ${icon('plus', 22)}<span>新增</span>
     </div>
-    <div class="mobile-nav-item ${S.currentPage === 'all-forms' ? 'active' : ''}" onclick="navigate('all-forms')">
+    <div class="mobile-nav-item ${S.currentPage === 'dept-home' || S.currentPage === 'all-forms' ? 'active' : ''}" onclick="navigate('dept-home')">
       ${icon('fileText', 22)}<span>表單</span>
     </div>
     <div class="mobile-nav-item ${S.currentPage === 'notifications' ? 'active' : ''}" onclick="navigate('notifications')">
@@ -1685,7 +1695,7 @@ function navigate(page, data) {
 function switchDept(deptId) {
   S.currentDept = deptId;
   if (S.currentPage !== 'new-form' && S.currentPage !== 'form-edit' && S.currentPage !== 'form-view') {
-    S.currentPage = 'all-forms';
+    S.currentPage = 'dept-home';
   }
   S.currentListPage = 1;
   renderAll();
@@ -1740,7 +1750,8 @@ function updateSearchResults(q) {
   
   // Search pages
   const pages = [
-    { name: '儀表板', page: 'dashboard' }, { name: '通知中心', page: 'notifications' },
+    { name: '儀表板', page: 'dashboard' }, { name: '部門首頁', page: 'dept-home' },
+    { name: '通知中心', page: 'notifications' },
     { name: '等待我處理', page: 'pending' }, { name: '草稿匣', page: 'drafts' },
     { name: '所有表單', page: 'all-forms' }, { name: '新增表單', page: 'new-form' },
     { name: '表單範本庫', page: 'templates' }, { name: '專案管理', page: 'projects' },
@@ -2111,6 +2122,68 @@ function renderModal() {
       `;
       footer = `<button class="btn btn-secondary" onclick="closeModal()">關閉</button>`;
     } else { body = '<p>找不到客戶</p>'; footer = `<button class="btn btn-secondary" onclick="closeModal()">關閉</button>`; }
+  } else if (S.modalType === 'iso-history') {
+    title = 'ISO 文件版本歷史';
+    const doc = S.modalData?.doc;
+    if (doc) {
+      body = `<div style="margin-bottom:12px;"><strong>${esc(doc.docNo)}</strong> ${esc(doc.name)} — 目前版本 v${doc.version}</div>
+      ${(doc.history || []).length === 0 ? '<p style="color:var(--text-tertiary);">尚無修訂記錄</p>' :
+        (doc.history || []).map(h => `<div style="padding:10px;margin-bottom:8px;background:var(--bg-tertiary);border-radius:var(--radius-sm);border-left:3px solid var(--accent);">
+          <div style="display:flex;justify-content:space-between;"><strong>v${esc(h.version)}</strong><span style="font-size:0.72rem;color:var(--text-tertiary);">${fmtDateTime(h.changedAt)}</span></div>
+          <div style="font-size:0.82rem;margin-top:4px;">修改人：${esc(h.changedBy)} ${h.approvedBy ? '· 核准：' + esc(h.approvedBy) : ''}</div>
+          <div style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px;">${esc(h.description)}</div>
+        </div>`).join('')}
+      <button class="btn btn-sm btn-primary" onclick="closeModal();addIsoRevision('${doc.id}')" style="margin-top:8px;">${icon('plus',14)} 新增修訂</button>`;
+      footer = `<button class="btn btn-secondary" onclick="closeModal()">關閉</button>`;
+    }
+  } else if (S.modalType === 'ai-followup') {
+    title = 'AI 追蹤信草稿（3 種方案）';
+    size = 'modal-lg';
+    const drafts = S.modalData?.drafts || [];
+    body = drafts.map(d => `
+      <div class="card" style="margin-bottom:12px;">
+        <div style="font-weight:600;color:var(--accent);margin-bottom:6px;">${esc(d.label)}</div>
+        <textarea class="form-textarea" rows="4">${esc(d.content)}</textarea>
+        <button class="btn btn-sm btn-primary" style="margin-top:6px;" onclick="toast('將透過 n8n 發送','info')">發送此版本</button>
+      </div>
+    `).join('');
+    footer = `<button class="btn btn-secondary" onclick="closeModal()">關閉</button>`;
+  } else if (S.modalType === 'view-task') {
+    title = '任務詳情';
+    const task = S.tasks.find(t => t.id === S.modalData?.taskId);
+    if (task) {
+      const deps = getTaskDependencyNames(task);
+      body = `
+        <div class="form-group"><label class="form-label">任務名稱</label><input class="form-input" value="${esc(task.title)}" onchange="task.title=this.value;saveData();"></div>
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">負責人</label><input class="form-input" value="${esc(task.assignee||'')}" onchange="let t=S.tasks.find(x=>x.id==='${task.id}');if(t){t.assignee=this.value;saveData();}"></div>
+          <div class="form-group"><label class="form-label">截止日</label><input class="form-input" type="date" value="${task.dueDate||''}" onchange="let t=S.tasks.find(x=>x.id==='${task.id}');if(t){t.dueDate=this.value;saveData();}"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">狀態</label><select class="form-select" onchange="let t=S.tasks.find(x=>x.id==='${task.id}');if(t){t.status=this.value;saveData();}">
+            ${['待辦','進行中','審查中','已完成'].map(s => `<option ${task.status===s?'selected':''}>${s}</option>`).join('')}
+          </select></div>
+          <div class="form-group"><label class="form-label">進度 ${task.progress||0}%</label><input type="range" min="0" max="100" value="${task.progress||0}" style="width:100%;" onchange="let t=S.tasks.find(x=>x.id==='${task.id}');if(t){t.progress=parseInt(this.value);saveData();}"></div>
+        </div>
+        <div style="margin-bottom:12px;">
+          <label class="form-label">依賴任務</label>
+          <div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:4px;">${deps || '無'}</div>
+          <button class="btn btn-sm btn-secondary" onclick="closeModal();setTaskDependency('${task.id}')">${icon('plus',14)} 設定依賴</button>
+        </div>
+        <div>
+          <label class="form-label">子任務 (${(task.subtasks||[]).length})</label>
+          ${(task.subtasks||[]).map((st, si) => `
+            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+              <input type="checkbox" ${st.done?'checked':''} onchange="toggleSubtask('${task.id}',${si})">
+              <span style="font-size:0.82rem;${st.done?'text-decoration:line-through;color:var(--text-tertiary);':''}">${esc(st.title)}</span>
+            </div>
+          `).join('')}
+          <button class="btn btn-sm btn-ghost" onclick="addSubtask('${task.id}');closeModal();">${icon('plus',14)} 新增子任務</button>
+        </div>
+      `;
+      footer = `<button class="btn btn-danger btn-sm" onclick="S.tasks=S.tasks.filter(t=>t.id!=='${task.id}');saveData();closeModal();renderContent();toast('任務已刪除','success');">刪除</button>
+        <button class="btn btn-secondary" onclick="closeModal();renderContent();">關閉</button>`;
+    } else { body = '<p>找不到任務</p>'; footer = `<button class="btn btn-secondary" onclick="closeModal()">關閉</button>`; }
   } else {
     root.innerHTML = '';
     return;
@@ -2132,6 +2205,164 @@ function renderModal() {
 }
 
 // ========== PAGES ==========
+
+// --- Department Home (Ragic Style) ---
+function pageDeptHome() {
+  const dept = S.departments.find(d => d.id === S.currentDept);
+  if (!dept) return pageDashboard();
+  const deptColor = dept.color || 'var(--accent)';
+  const types = FORM_TYPES[S.currentDept] || [];
+  const deptForms = S.forms.filter(f => f.dept === S.currentDept);
+  const deptPending = deptForms.filter(f => f.status === 'pending').length;
+  const deptApproved = deptForms.filter(f => f.status === 'approved').length;
+  const deptDraft = deptForms.filter(f => f.status === 'draft').length;
+  const recent = [...deptForms].sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt)).slice(0, 15);
+  
+  // Group forms by type
+  const formsByType = {};
+  types.forEach(t => { formsByType[t.id] = deptForms.filter(f => f.formType === t.id); });
+  
+  return `
+    <div class="fade-in">
+      <!-- Department Header -->
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+        <div style="width:48px;height:48px;border-radius:var(--radius-md);background:${deptColor};display:flex;align-items:center;justify-content:center;color:white;">
+          ${icon(dept.icon || 'folder', 24)}
+        </div>
+        <div>
+          <h2 style="font-size:1.4rem;font-weight:700;">${esc(dept.name)}部</h2>
+          <div style="font-size:0.78rem;color:var(--text-tertiary);">${esc(dept.prefix)} · ${types.length} 種表單類型 · ${deptForms.length} 張表單</div>
+        </div>
+        <div style="margin-left:auto;">
+          <button class="btn btn-primary" onclick="navigate('new-form')">${icon('plus')} 新增表單</button>
+        </div>
+      </div>
+      
+      <!-- Stats Row -->
+      <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);">
+        <div class="stat-card">
+          <div class="stat-icon" style="background:${deptColor}20;color:${deptColor};">${icon('fileText',22)}</div>
+          <div class="stat-content"><div class="stat-value">${deptForms.length}</div><div class="stat-label">全部表單</div></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon" style="background:var(--warning-bg);color:#e68a00;">${icon('clock',22)}</div>
+          <div class="stat-content"><div class="stat-value">${deptPending}</div><div class="stat-label">審核中</div></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon" style="background:var(--success-bg);color:var(--success);">${icon('checkCircle',22)}</div>
+          <div class="stat-content"><div class="stat-value">${deptApproved}</div><div class="stat-label">已核准</div></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon" style="background:var(--bg-tertiary);color:var(--text-tertiary);">${icon('draft',22)}</div>
+          <div class="stat-content"><div class="stat-value">${deptDraft}</div><div class="stat-label">草稿</div></div>
+        </div>
+      </div>
+      
+      <!-- Form Types - Ragic Color Blocks -->
+      <div class="section-block wine" style="border-left-color:${deptColor};">
+        <div class="section-block-title" style="color:${deptColor};">
+          ${icon('fileText')} 表單類型（點擊新增）
+        </div>
+        ${types.length === 0 ? '<div style="font-size:0.85rem;color:var(--text-tertiary);">此部門尚未設定表單類型</div>' : `
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
+            ${types.map(t => {
+              const count = (formsByType[t.id] || []).length;
+              return `
+                <div class="card" style="margin:0;cursor:pointer;border-left:3px solid ${deptColor};padding:14px;" onclick="createNewForm('${S.currentDept}','${t.id}','${esc(t.name)}')">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                    <div>
+                      <div style="font-weight:600;font-size:0.88rem;">${esc(t.name)}</div>
+                      ${t.docNo ? `<div style="font-size:0.68rem;color:var(--text-tertiary);font-family:var(--font-mono);margin-top:2px;">${esc(t.docNo)}</div>` : ''}
+                    </div>
+                    <span style="font-size:0.72rem;background:var(--bg-tertiary);padding:2px 8px;border-radius:10px;color:var(--text-tertiary);">${count}</span>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        `}
+      </div>
+      
+      <!-- Other Input Methods -->
+      <div class="section-block olive" style="border-left-color:${deptColor}80;">
+        <div class="section-block-title">其他輸入方式</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;">
+          <button class="btn btn-sm btn-secondary" onclick="toast('LINE 文字匯入：貼入文字→AI解析→自動填表','warning')">${icon('clipboard',14)} LINE 匯入</button>
+          <button class="btn btn-sm btn-secondary" onclick="startVoiceInput()">🎤 語音輸入</button>
+          <button class="btn btn-sm btn-secondary" onclick="toast('拍照上傳功能','warning')">📷 拍照</button>
+          <button class="btn btn-sm btn-secondary" onclick="toast('AI 圖片辨識功能','warning')">🤖 AI 辨識</button>
+          <button class="btn btn-sm btn-secondary" onclick="toast('Word/Excel 匯入功能','warning')">${icon('upload',14)} 檔案匯入</button>
+          <button class="btn btn-sm btn-secondary" onclick="navigate('templates')">${icon('clipboard',14)} 範本套用</button>
+        </div>
+      </div>
+      
+      <!-- Recent Forms Table -->
+      <div class="section-block gold" style="border-left-color:${deptColor}60;">
+        <div class="section-block-title" style="display:flex;justify-content:space-between;">
+          <span>${icon('clock')} 最近表單</span>
+          <span style="font-size:0.72rem;color:var(--text-tertiary);">共 ${deptForms.length} 張</span>
+        </div>
+        ${recent.length === 0 ? `
+          <div style="text-align:center;padding:30px;color:var(--text-tertiary);">
+            <p style="font-size:0.85rem;">此部門尚無表單</p>
+            <button class="btn btn-sm btn-primary" onclick="navigate('new-form')" style="margin-top:8px;">${icon('plus')} 新增第一張表單</button>
+          </div>
+        ` : `
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>表單編號</th>
+                <th>類型</th>
+                <th>申請人</th>
+                <th>版本</th>
+                <th>狀態</th>
+                <th>更新時間</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${recent.map(f => `
+                <tr onclick="viewForm('${f.id}')">
+                  <td style="font-family:var(--font-mono);font-size:0.78rem;">${esc(f.formNo)}</td>
+                  <td>${esc(f.formTypeName || f.formType)}</td>
+                  <td>${esc(f.applicant || '')}</td>
+                  <td style="font-size:0.78rem;">v${f.version || 1}</td>
+                  <td>${statusBadge(f.status)}</td>
+                  <td style="font-size:0.78rem;color:var(--text-tertiary);">${fmtDateTime(f.updatedAt || f.createdAt)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+// Voice input helper
+function startVoiceInput() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    toast('您的瀏覽器不支援語音輸入', 'error');
+    return;
+  }
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const recognition = new SpeechRecognition();
+  recognition.lang = 'zh-TW';
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.onresult = (e) => {
+    const text = e.results[0][0].transcript;
+    toast('語音辨識：' + text, 'success');
+    // Try to fill the focused input
+    const focused = document.activeElement;
+    if (focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA')) {
+      focused.value += text;
+      focused.dispatchEvent(new Event('change'));
+    }
+  };
+  recognition.onerror = (e) => toast('語音辨識錯誤：' + e.error, 'error');
+  recognition.start();
+  toast('請說話...', 'info');
+}
 
 // --- Dashboard ---
 function pageDashboard() {
@@ -2342,8 +2573,8 @@ function pageFormList(listType) {
       break;
     case 'all-forms':
     default:
-      title = `所有表單 - ${getDeptName(S.currentDept)}`;
-      forms = S.forms.filter(f => f.dept === S.currentDept);
+      title = '系統所有文件';
+      forms = [...S.forms];
       break;
   }
   
@@ -2359,11 +2590,13 @@ function pageFormList(listType) {
     <div class="fade-in">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
         <h2 style="font-size:1.3rem;font-weight:700;">${title}</h2>
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn btn-sm btn-success" onclick="batchApprove()">批次核准</button>
           <button class="btn btn-sm btn-danger" onclick="batchReject()">批次退回</button>
-          <button class="btn btn-sm btn-secondary" onclick="batchDeleteDrafts()">${icon('trash',14)} 批次刪除</button>
+          <button class="btn btn-sm btn-secondary" onclick="batchDeleteDrafts()">${icon('trash',14)} 刪除草稿</button>
           <button class="btn btn-sm btn-secondary" onclick="exportFormsCsv('${listType}')">${icon('download')} CSV</button>
+          <button class="btn btn-sm btn-secondary" onclick="batchExportPDF()">${icon('download')} PDF</button>
+          <button class="btn btn-sm btn-secondary" onclick="importFormsCsv()">${icon('upload')} CSV 匯入</button>
           <button class="btn btn-sm btn-primary" onclick="navigate('new-form')">${icon('plus')} 新增</button>
         </div>
       </div>
@@ -2728,9 +2961,10 @@ function pageFormView() {
             <button class="btn btn-success" onclick="openModal('approve',{formId:'${form.id}'})">${icon('checkCircle')} 核准</button>
             <button class="btn btn-danger" onclick="openModal('reject',{formId:'${form.id}'})">${icon('x')} 退回</button>
           ` : ''}
-          <button class="btn btn-secondary" onclick="toast('PDF 匯出功能開發中','warning')">${icon('download')} PDF</button>
+          <button class="btn btn-secondary" onclick="exportFormPDF('${form.id}')">${icon('download')} PDF</button>
           <button class="btn btn-secondary" onclick="showFormQR('${form.id}')">QR Code</button>
-          <button class="btn btn-secondary" onclick="openModal('signature',{formId:'${form.id}'})">✍️ 電子簽名</button>
+          <button class="btn btn-secondary" onclick="openModal('signature',{formId:'${form.id}'})">✍️ 簽名</button>
+          <button class="btn btn-secondary" onclick="importSignatureImage('${form.id}')">📎 匯入簽名</button>
         </div>
       </div>
       
@@ -3512,7 +3746,7 @@ function pageSuppliers() {
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
       <h2 style="font-size:1.3rem;font-weight:700;">供應商管理</h2>
       <div style="display:flex;gap:8px;">
-        <button class="btn btn-sm btn-secondary" onclick="toast('產生外部填表連結功能開發中','warning')">${icon('send')} 外部入口連結</button>
+        <button class="btn btn-sm btn-secondary" onclick="generateSupplierLink()">${icon('send')} 外部入口連結</button>
         <button class="btn btn-sm btn-primary" onclick="openModal('add-supplier')">${icon('plus')} 新增供應商</button>
       </div>
     </div>
@@ -3589,7 +3823,17 @@ function renderKBPageContent() {
       <div id="kb-blocks">
         ${(page.blocks || []).map((b, i) => renderKBBlock(b, i, page.id)).join('')}
       </div>
-      <button class="btn btn-ghost btn-sm" onclick="addKBBlock('${page.id}')" style="margin-top:8px;">${icon('plus',14)} 新增區塊</button>
+      <button class="btn btn-ghost btn-sm" onclick="addKBBlock('${page.id}')" style="margin-top:8px;">${icon('plus',14)} 段落</button>
+      <button class="btn btn-ghost btn-sm" onclick="addKBBlockWithType('${page.id}','h2')" style="margin-top:8px;">H2</button>
+      <button class="btn btn-ghost btn-sm" onclick="addKBBlockWithType('${page.id}','todo')" style="margin-top:8px;">☑ 待辦</button>
+      <button class="btn btn-ghost btn-sm" onclick="addKBBlockWithType('${page.id}','quote')" style="margin-top:8px;">引用</button>
+      <button class="btn btn-ghost btn-sm" onclick="addKBBlockWithType('${page.id}','code')" style="margin-top:8px;">程式碼</button>
+      <button class="btn btn-ghost btn-sm" onclick="addKBBlockWithType('${page.id}','divider')" style="margin-top:8px;">—分隔</button>
+      <button class="btn btn-ghost btn-sm" onclick="addKBBlockWithType('${page.id}','callout')" style="margin-top:8px;">💡提示</button>
+      <button class="btn btn-ghost btn-sm" onclick="addKBBlockWithType('${page.id}','table')" style="margin-top:8px;">表格</button>
+      <button class="btn btn-ghost btn-sm" onclick="addKBBlockWithType('${page.id}','image')" style="margin-top:8px;">圖片</button>
+      <button class="btn btn-ghost btn-sm" onclick="addKBBlockWithType('${page.id}','details')" style="margin-top:8px;">折疊</button>
+      <button class="btn btn-ghost btn-sm" onclick="addKBBlockWithType('${page.id}','list')" style="margin-top:8px;">清單</button>
       <div style="margin-top:16px;display:flex;gap:8px;">
         <button class="btn btn-sm btn-secondary" onclick="addKBPage('${page.id}')">${icon('plus',14)} 子頁面</button>
         <button class="btn btn-sm btn-secondary" onclick="exportKBMarkdown('${page.id}')">${icon('download',14)} 匯出 Markdown</button>
@@ -3610,6 +3854,30 @@ function renderKBBlock(block, idx, pageId) {
     </div>`;
   }
   if (block.type === 'divider') return '<hr style="border:none;border-top:1px solid var(--border-color);margin:12px 0;">';
+  if (block.type === 'table') {
+    const rows = (block.content || '').split('\n').map(r => r.split('|').map(c => c.trim()));
+    return `<div style="overflow-x:auto;margin:8px 0;"><table class="data-table" style="font-size:0.82rem;">
+      ${rows.length > 0 ? `<thead><tr>${rows[0].map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>` : ''}
+      <tbody>${rows.slice(1).map(r => `<tr>${r.map(c => `<td contenteditable="true" style="min-width:60px;" onblur="updateKBTableCell('${pageId}',${idx})">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody>
+    </table></div>`;
+  }
+  if (block.type === 'image') {
+    return `<div style="margin:8px 0;"><img src="${esc(block.content)}" style="max-width:100%;border-radius:var(--radius-sm);border:1px solid var(--border-color);" onerror="this.style.display='none'"><div style="font-size:0.72rem;color:var(--text-tertiary);margin-top:2px;">圖片</div></div>`;
+  }
+  if (block.type === 'details') {
+    return `<details style="margin:8px 0;padding:8px;background:var(--bg-tertiary);border-radius:var(--radius-sm);">
+      <summary style="cursor:pointer;font-weight:500;font-size:0.85rem;">${esc(block.summary || '點擊展開')}</summary>
+      <div contenteditable="true" style="margin-top:8px;font-size:0.85rem;outline:none;" onblur="updateKBBlock('${pageId}',${idx},this.textContent)">${esc(block.content)}</div>
+    </details>`;
+  }
+  if (block.type === 'list') {
+    const items = (block.content || '').split('\n').filter(l => l.trim());
+    return `<ul style="margin:8px 0;padding-left:20px;font-size:0.9rem;">${items.map(li => `<li>${esc(li)}</li>`).join('')}</ul>`;
+  }
+  if (block.type === 'ol') {
+    const items = (block.content || '').split('\n').filter(l => l.trim());
+    return `<ol style="margin:8px 0;padding-left:20px;font-size:0.9rem;">${items.map(li => `<li>${esc(li)}</li>`).join('')}</ol>`;
+  }
   
   return `<div style="${style};padding:4px 0;min-height:1.5em;" contenteditable="true" onblur="updateKBBlock('${pageId}',${idx},this.textContent)" placeholder="輸入內容...">${esc(block.content)}</div>`;
 }
@@ -3929,7 +4197,8 @@ function pageWorkflowSettings() {
       <div class="card-header"><div class="card-title">代理人設定</div></div>
       <p style="font-size:0.85rem;color:var(--text-secondary);">主管出差時可指定代理人處理簽核。</p>
       <div style="margin-top:12px;">
-        <button class="btn btn-sm btn-secondary" onclick="toast('代理人設定功能開發中','warning')">${icon('users',14)} 設定代理人</button>
+        <button class="btn btn-sm btn-secondary" onclick="setDelegate()">${icon('users',14)} 設定代理人</button>
+        ${(() => { const d = getActiveDelegate(); return d ? `<div style="margin-top:8px;padding:8px;background:var(--success-bg);border-radius:var(--radius-sm);font-size:0.82rem;">目前代理人：<strong>${esc(d.name)}</strong>（${d.start} ~ ${d.end}）</div>` : ''; })()}
       </div>
     </div>
   </div>`;
@@ -4064,7 +4333,7 @@ function pageIntegrations() {
     <div class="card">
       <div class="card-header"><div class="card-title">通用 API 管理</div></div>
       <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:12px;">設定自訂 API 端點，用於連接其他外部系統。</p>
-      <button class="btn btn-sm btn-secondary" onclick="toast('API 管理介面開發中','warning')">${icon('plus',14)} 新增 API 端點</button>
+      <button class="btn btn-sm btn-secondary" onclick="navigate('api-management')">${icon('plus',14)} 管理 API 端點</button>
     </div>
   </div>`;
 }
@@ -5231,6 +5500,629 @@ function initOfflineDetection() {
 // ========== WATERMARK PERIODIC UPDATE ==========
 function initWatermarkTimer() {
   setInterval(renderWatermark, 300000); // Every 5 minutes
+}
+
+// ========== [FIX] PDF EXPORT ==========
+function exportFormPDF(formId) {
+  const form = S.forms.find(f => f.id === formId);
+  if (!form) { toast('找不到表單', 'error'); return; }
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    doc.setFont('helvetica');
+    doc.setFontSize(16);
+    doc.text('FormHub - ' + (form.formTypeName || ''), 20, 20);
+    doc.setFontSize(10);
+    doc.text(form.formNo + ' | ' + getDeptName(form.dept) + ' | v' + (form.version||1), 20, 28);
+    doc.text(form.applicant + ' | ' + fmtDate(form.createdAt) + ' | ' + (form.status||''), 20, 34);
+    doc.line(20, 37, 190, 37);
+    let y = 44;
+    (form.fields || []).forEach(f => {
+      if (y > 270) { doc.addPage(); y = 20; }
+      doc.setFontSize(9);
+      doc.setTextColor(100);
+      doc.text(f.label + ':', 20, y);
+      doc.setTextColor(0);
+      doc.setFontSize(10);
+      const val = f.sensitive && S.role !== 'admin' ? '***' : (f.value || '-');
+      doc.text(String(val), 70, y);
+      y += 8;
+    });
+    if (form.items && form.items.length > 0) {
+      y += 5;
+      doc.setFontSize(11);
+      doc.text('Items:', 20, y); y += 6;
+      doc.setFontSize(9);
+      form.items.forEach((item, i) => {
+        if (y > 270) { doc.addPage(); y = 20; }
+        const sub = (parseFloat(item.qty)||0) * (parseFloat(item.price)||0);
+        doc.text(`${i+1}. ${item.name||''} x${item.qty||0} ${item.unit||''} @${item.price||0} = ${sub}`, 25, y);
+        y += 6;
+      });
+    }
+    if (form.approvalHistory && form.approvalHistory.length > 0) {
+      y += 8;
+      doc.setFontSize(11);
+      doc.text('Approval History:', 20, y); y += 6;
+      doc.setFontSize(9);
+      form.approvalHistory.forEach(h => {
+        if (y > 270) { doc.addPage(); y = 20; }
+        doc.text(`${fmtDateTime(h.timestamp)} | ${h.name} | ${h.action} ${h.note ? '- ' + h.note : ''}`, 25, y);
+        y += 6;
+      });
+    }
+    if (form.signature) {
+      if (y > 230) { doc.addPage(); y = 20; }
+      y += 5;
+      doc.text('Signature:', 20, y); y += 3;
+      try { doc.addImage(form.signature, 'PNG', 20, y, 60, 25); } catch {}
+    }
+    doc.save(form.formNo + '.pdf');
+    toast('PDF 已匯出', 'success');
+  } catch (e) {
+    console.error('PDF export error', e);
+    toast('PDF 匯出失敗（jsPDF 載入中，請稍後重試）', 'error');
+  }
+}
+
+function batchExportPDF() {
+  const checked = [...document.querySelectorAll('.form-checkbox:checked')].map(cb => cb.dataset.id);
+  if (checked.length === 0) { toast('請先勾選表單', 'warning'); return; }
+  checked.forEach(id => exportFormPDF(id));
+}
+
+// ========== [FIX] SIGNATURE IMPORT FROM IMAGE ==========
+function importSignatureImage(formId) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const form = S.forms.find(f => f.id === formId);
+      if (form) {
+        form.signature = ev.target.result;
+        form.signedBy = S.user?.name || '訪客';
+        form.signedAt = new Date().toISOString();
+        saveData(); renderContent();
+        toast('簽名圖檔已匯入', 'success');
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+  input.click();
+}
+
+// ========== [FIX] TASK DEPENDENCIES ==========
+function setTaskDependency(taskId) {
+  const task = S.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  const otherTasks = S.tasks.filter(t => t.id !== taskId);
+  if (otherTasks.length === 0) { toast('沒有其他任務可設定依賴', 'warning'); return; }
+  const options = otherTasks.map(t => t.title).join('\n');
+  const chosen = prompt('選擇依賴的任務名稱（輸入完整名稱）：\n\n' + options);
+  if (!chosen) return;
+  const dep = otherTasks.find(t => t.title === chosen.trim());
+  if (!dep) { toast('找不到該任務', 'error'); return; }
+  if (!task.dependencies) task.dependencies = [];
+  if (task.dependencies.includes(dep.id)) { toast('已存在此依賴', 'warning'); return; }
+  task.dependencies.push(dep.id);
+  saveData(); renderContent();
+  toast('依賴已設定：' + dep.title, 'success');
+}
+
+function getTaskDependencyNames(task) {
+  if (!task.dependencies || task.dependencies.length === 0) return '';
+  return task.dependencies.map(id => {
+    const t = S.tasks.find(x => x.id === id);
+    return t ? t.title : '';
+  }).filter(Boolean).join(', ');
+}
+
+// ========== [FIX] SUBTASK UI ==========
+function addSubtask(taskId) {
+  const title = prompt('子任務名稱：');
+  if (!title) return;
+  const task = S.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  if (!task.subtasks) task.subtasks = [];
+  task.subtasks.push({ id: uid(), title, done: false, createdAt: new Date().toISOString() });
+  saveData(); renderContent();
+}
+
+function toggleSubtask(taskId, subIdx) {
+  const task = S.tasks.find(t => t.id === taskId);
+  if (!task || !task.subtasks || !task.subtasks[subIdx]) return;
+  task.subtasks[subIdx].done = !task.subtasks[subIdx].done;
+  saveData(); renderContent();
+}
+
+// ========== [FIX] PROCESS ROUTE (工藝路線) ==========
+function pageProcessRoutes() {
+  const routes = S.modalData?.processRoutes || lsGet('processRoutes') || [];
+  return `<div class="fade-in">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+      <h2 style="font-size:1.3rem;font-weight:700;">工藝路線</h2>
+      <button class="btn btn-sm btn-primary" onclick="addProcessRoute()">${icon('plus')} 新增路線</button>
+    </div>
+    ${routes.length === 0 ? '<div class="empty-state"><h3>尚無工藝路線</h3><p>設定多站點製程順序，每站標準工時</p></div>' : routes.map(r => `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">${esc(r.name)}</div>
+          <span style="font-size:0.78rem;color:var(--text-tertiary);">${(r.steps||[]).length} 站</span>
+        </div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
+          ${(r.steps||[]).map((step, si) => `
+            <div style="display:flex;align-items:center;gap:4px;">
+              <div style="padding:8px 14px;background:var(--accent-bg);border-radius:var(--radius-sm);text-align:center;min-width:80px;">
+                <div style="font-size:0.82rem;font-weight:600;">${esc(step.name)}</div>
+                <div style="font-size:0.68rem;color:var(--text-tertiary);">${step.stdTime || 0} 分</div>
+              </div>
+              ${si < r.steps.length - 1 ? '<span style="color:var(--text-tertiary);">→</span>' : ''}
+            </div>
+          `).join('')}
+        </div>
+        <div style="margin-top:8px;font-size:0.72rem;color:var(--text-tertiary);">
+          總標準工時：${(r.steps||[]).reduce((s, st) => s + (st.stdTime||0), 0)} 分鐘
+        </div>
+      </div>
+    `).join('')}
+  </div>`;
+}
+
+function addProcessRoute() {
+  const name = prompt('路線名稱（例：SMT 產線）：');
+  if (!name) return;
+  const stepsStr = prompt('站點（格式：站名:工時分鐘，每行一站）\n例：\nSMT上料:15\n回焊:10\nAOI檢查:5\n人工目檢:8');
+  if (!stepsStr) return;
+  const steps = stepsStr.split('\n').filter(l => l.trim()).map(l => {
+    const parts = l.split(':');
+    return { name: parts[0]?.trim() || l.trim(), stdTime: parseInt(parts[1]) || 0 };
+  });
+  const routes = lsGet('processRoutes') || [];
+  routes.push({ id: uid(), name, steps, createdAt: new Date().toISOString() });
+  lsSet('processRoutes', routes);
+  S.modalData = { processRoutes: routes };
+  renderContent();
+  toast('工藝路線已建立', 'success');
+}
+
+// ========== [FIX] ISO VERSION HISTORY UI ==========
+function viewIsoHistory(docId) {
+  const doc = S.isoDocs.find(d => d.id === docId);
+  if (!doc) return;
+  openModal('iso-history', { doc });
+}
+
+function addIsoRevision(docId) {
+  const doc = S.isoDocs.find(d => d.id === docId);
+  if (!doc) return;
+  const changeDesc = prompt('變更說明：');
+  if (!changeDesc) return;
+  if (!doc.history) doc.history = [];
+  doc.history.push({
+    version: doc.version,
+    changedBy: S.user?.name || '訪客',
+    changedAt: new Date().toISOString(),
+    description: changeDesc,
+    approvedBy: '',
+    effectiveDate: ''
+  });
+  // Increment version
+  const parts = doc.version.split('.');
+  parts[1] = String(parseInt(parts[1] || 0) + 1);
+  doc.version = parts.join('.');
+  addAuditLog('ISO修訂', `${doc.docNo} 升版至 v${doc.version}: ${changeDesc}`);
+  saveData(); renderContent();
+  toast('已升版至 v' + doc.version, 'success');
+}
+
+// ========== [FIX] NEWSLETTER SUBSCRIBERS CSV IMPORT/EXPORT ==========
+function pageSubscribers() {
+  const subs = lsGet('newsletter_subscribers') || [];
+  return `<div class="fade-in">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h2 style="font-size:1.3rem;font-weight:700;">訂閱者管理 (${subs.length})</h2>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-sm btn-secondary" onclick="exportSubscribersCsv()">${icon('download')} 匯出 CSV</button>
+        <button class="btn btn-sm btn-secondary" onclick="document.getElementById('sub-csv-input').click()">${icon('upload')} CSV 匯入</button>
+        <input type="file" id="sub-csv-input" accept=".csv" style="display:none" onchange="importSubscribersCsv(this)">
+        <button class="btn btn-sm btn-primary" onclick="addSubscriber()">${icon('plus')} 新增</button>
+      </div>
+    </div>
+    ${subs.length === 0 ? '<div class="empty-state"><h3>尚無訂閱者</h3></div>' : `
+    <div class="card" style="padding:0;overflow:hidden;">
+      <table class="data-table"><thead><tr><th>Email</th><th>姓名</th><th>加入日期</th><th>操作</th></tr></thead>
+      <tbody>${subs.map((s, i) => `<tr><td>${esc(s.email)}</td><td>${esc(s.name || '-')}</td><td style="font-size:0.78rem;">${fmtDate(s.addedAt)}</td><td><button class="btn btn-ghost btn-sm" onclick="removeSubscriber(${i})">${icon('trash',14)}</button></td></tr>`).join('')}</tbody></table>
+    </div>`}
+  </div>`;
+}
+
+function addSubscriber() {
+  const email = prompt('Email:');
+  if (!email) return;
+  const name = prompt('姓名（選填）:') || '';
+  const subs = lsGet('newsletter_subscribers') || [];
+  subs.push({ email, name, addedAt: new Date().toISOString() });
+  lsSet('newsletter_subscribers', subs);
+  renderContent(); toast('已新增訂閱者', 'success');
+}
+
+function removeSubscriber(idx) {
+  const subs = lsGet('newsletter_subscribers') || [];
+  subs.splice(idx, 1);
+  lsSet('newsletter_subscribers', subs);
+  renderContent();
+}
+
+function exportSubscribersCsv() {
+  const subs = lsGet('newsletter_subscribers') || [];
+  const csv = '\ufeff' + 'Email,Name,AddedAt\n' + subs.map(s => `"${s.email}","${s.name||''}","${s.addedAt}"`).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'subscribers.csv'; a.click();
+  toast('訂閱者已匯出', 'success');
+}
+
+function importSubscribersCsv(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const lines = e.target.result.split('\n').slice(1);
+    const subs = lsGet('newsletter_subscribers') || [];
+    let added = 0;
+    lines.forEach(line => {
+      const parts = line.split(',').map(p => p.replace(/"/g, '').trim());
+      if (parts[0] && parts[0].includes('@')) {
+        if (!subs.find(s => s.email === parts[0])) {
+          subs.push({ email: parts[0], name: parts[1] || '', addedAt: new Date().toISOString() });
+          added++;
+        }
+      }
+    });
+    lsSet('newsletter_subscribers', subs);
+    renderContent();
+    toast(`已匯入 ${added} 位訂閱者`, 'success');
+  };
+  reader.readAsText(file);
+}
+
+// ========== [FIX] FIELD-LEVEL REMINDERS ==========
+function setFieldReminder(formId, fieldKey) {
+  const form = S.forms.find(f => f.id === formId);
+  if (!form) return;
+  const date = prompt('提醒日期 (YYYY-MM-DD)：');
+  if (!date) return;
+  const cycle = prompt('週期（留空=一次性，或輸入：每天/每週/每月）：') || '';
+  if (!form.fieldReminders) form.fieldReminders = {};
+  form.fieldReminders[fieldKey] = { date, cycle, active: true };
+  saveData();
+  toast('提醒已設定：' + date + (cycle ? ' (' + cycle + ')' : ''), 'success');
+}
+
+// ========== [FIX] RENDER OPTIMIZATION (RAF + HASH) ==========
+let _rafPending = false;
+let _contentHash = '';
+
+function renderAllOptimized(force) {
+  if (_rafPending && !force) return;
+  _rafPending = true;
+  requestAnimationFrame(() => {
+    _rafPending = false;
+    renderHeader();
+    renderDeptTabs();
+    renderSidebar();
+    // Hash-based content update
+    const newHash = S.currentPage + '|' + S.currentDept + '|' + S.currentListPage + '|' + S.forms.length + '|' + S.modalType;
+    if (newHash !== _contentHash || force) {
+      _contentHash = newHash;
+      renderContent();
+    }
+    renderMobileNav();
+    renderWatermark();
+  });
+}
+
+// ========== [FIX] AI FEATURES VIA N8N ==========
+function aiParseLineText(formId) {
+  const text = prompt('貼入 LINE 文字內容：');
+  if (!text) return;
+  if (!checkRateLimit('ai', 5)) return;
+  callN8nAI('parse-form', { text, formId }, (result) => {
+    if (result && result.fields) {
+      const form = S.forms.find(f => f.id === formId);
+      if (form) {
+        result.fields.forEach(rf => {
+          const field = form.fields.find(f => f.key === rf.key || f.label === rf.label);
+          if (field) field.value = rf.value;
+        });
+        saveData(); renderContent();
+        toast('AI 已解析並填入欄位，請確認', 'success');
+      }
+    }
+  });
+}
+
+function aiImageRecognize(formId) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!checkRateLimit('ai', 5)) return;
+    const compressed = await compressImage(file);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      callN8nAI('image-recognize', { image: ev.target.result, formId }, (result) => {
+        if (result && result.fields) {
+          const form = S.forms.find(f => f.id === formId);
+          if (form) {
+            result.fields.forEach(rf => {
+              const field = form.fields.find(f => f.key === rf.key || f.label === rf.label);
+              if (field) field.value = rf.value;
+            });
+            saveData(); renderContent();
+            toast('AI 已辨識圖片並填入欄位', 'success');
+          }
+        }
+      });
+    };
+    reader.readAsDataURL(compressed);
+  };
+  input.click();
+}
+
+function aiDraftFollowUp(emailId) {
+  const email = S.emailTracking.find(e => e.id === emailId);
+  if (!email) return;
+  if (!checkRateLimit('ai', 5)) return;
+  callN8nAI('draft-followup', { to: email.to, subject: email.subject, sentAt: email.sentAt }, (result) => {
+    if (result) {
+      openModal('ai-followup', { emailId, drafts: result.drafts || [
+        { type: 'A', label: '方案A：直接追蹤', content: '（AI 生成中...請確認 n8n webhook 已設定）' },
+        { type: 'B', label: '方案B：提供價值', content: '（AI 生成中...）' },
+        { type: 'C', label: '方案C：輕鬆詢問', content: '（AI 生成中...）' },
+      ]});
+    }
+  });
+}
+
+function aiGenerateProspectEmail(customerId) {
+  const cust = S.customers.find(c => c.id === customerId);
+  if (!cust) return;
+  if (!checkRateLimit('ai', 5)) return;
+  callN8nAI('prospect-email', { company: cust.company, industry: cust.industry, contact: cust.contact }, (result) => {
+    if (result && result.email) {
+      openModal('ai-prospect-email', { customerId, email: result.email });
+    }
+  });
+  toast('AI 正在生成個人化開發信...', 'info');
+}
+
+function aiGenerateNewsletter(newsletterId) {
+  const nl = S.newsletters.find(n => n.id === newsletterId);
+  if (!nl) return;
+  if (!checkRateLimit('ai', 5)) return;
+  callN8nAI('generate-newsletter', { title: nl.title }, (result) => {
+    if (result && result.content) {
+      nl.content = result.content;
+      saveData(); renderContent();
+      toast('AI 已生成電子報內容', 'success');
+    }
+  });
+  toast('AI 正在生成電子報...', 'info');
+}
+
+function callN8nAI(action, data, callback) {
+  const webhookUrl = lsGet('n8n_webhook') || 'https://lalav.zeabur.app/webhook/formhub-ai';
+  fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, ...data, userId: S.user?.uid })
+  })
+  .then(r => r.json())
+  .then(result => { if (callback) callback(result); })
+  .catch(e => {
+    console.warn('[AI] n8n call failed:', e);
+    toast('AI 功能需要 n8n webhook 配合（請在整合設定中配置）', 'warning');
+    if (callback) callback(null);
+  });
+}
+
+// ========== [FIX] SUPPLIER EXTERNAL PORTAL ==========
+function generateSupplierLink() {
+  const linkId = uid();
+  const expiry = new Date(); expiry.setDate(expiry.getDate() + 30);
+  const link = location.origin + location.pathname + '?supplier_form=' + linkId;
+  lsSet('supplier_link_' + linkId, { createdAt: new Date().toISOString(), expiresAt: expiry.toISOString(), createdBy: S.user?.name });
+  navigator.clipboard?.writeText(link)
+    .then(() => toast('供應商填表連結已複製（有效期30天）', 'success'))
+    .catch(() => {
+      prompt('請複製此連結發送給供應商：', link);
+    });
+  addAuditLog('產生連結', '產生供應商外部入口連結');
+}
+
+// ========== [FIX] API MANAGEMENT ==========
+function pageApiManagement() {
+  const apis = lsGet('custom_apis') || [];
+  return `<div class="fade-in">
+    <h2 style="font-size:1.3rem;font-weight:700;margin-bottom:20px;">通用 API 管理</h2>
+    <button class="btn btn-sm btn-primary" onclick="addCustomApi()" style="margin-bottom:16px;">${icon('plus')} 新增 API 端點</button>
+    ${apis.length === 0 ? '<div class="empty-state"><h3>尚無自訂 API</h3><p>新增 HTTP GET/POST 端點與變數模板</p></div>' : apis.map(api => `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><span style="font-size:0.72rem;font-weight:600;padding:2px 6px;border-radius:4px;background:${api.method==='POST'?'var(--success)':'var(--info)'};color:white;margin-right:6px;">${api.method}</span>${esc(api.name)}</div>
+          <button class="btn btn-ghost btn-sm" onclick="deleteCustomApi('${api.id}')">${icon('trash',14)}</button>
+        </div>
+        <div style="font-size:0.78rem;font-family:var(--font-mono);background:var(--bg-tertiary);padding:8px;border-radius:var(--radius-sm);word-break:break-all;">${esc(api.url)}</div>
+        ${api.headers ? `<div style="font-size:0.72rem;color:var(--text-tertiary);margin-top:4px;">Headers: ${esc(api.headers)}</div>` : ''}
+        <button class="btn btn-sm btn-secondary" onclick="testCustomApi('${api.id}')" style="margin-top:8px;">測試</button>
+      </div>
+    `).join('')}
+  </div>`;
+}
+
+function addCustomApi() {
+  const name = prompt('API 名稱：');
+  if (!name) return;
+  const method = prompt('方法（GET 或 POST）：', 'GET')?.toUpperCase() || 'GET';
+  const url = prompt('URL（支援 {{變數}} 模板）：');
+  if (!url) return;
+  const headers = prompt('Headers（JSON，選填）：') || '';
+  const apis = lsGet('custom_apis') || [];
+  apis.push({ id: uid(), name, method, url, headers, createdAt: new Date().toISOString() });
+  lsSet('custom_apis', apis);
+  renderContent(); toast('API 已新增', 'success');
+}
+
+function deleteCustomApi(apiId) {
+  const apis = (lsGet('custom_apis') || []).filter(a => a.id !== apiId);
+  lsSet('custom_apis', apis);
+  renderContent();
+}
+
+function testCustomApi(apiId) {
+  const apis = lsGet('custom_apis') || [];
+  const api = apis.find(a => a.id === apiId);
+  if (!api) return;
+  toast('測試 API: ' + api.method + ' ' + api.url, 'info');
+  fetch(api.url, { method: api.method })
+    .then(r => r.text())
+    .then(t => toast('回應: ' + t.substring(0, 100), 'success'))
+    .catch(e => toast('錯誤: ' + e.message, 'error'));
+}
+
+// ========== [FIX] CSV IMPORT ==========
+function importFormsCsv() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.csv';
+  input.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const lines = ev.target.result.split('\n');
+      if (lines.length < 2) { toast('CSV 格式錯誤', 'error'); return; }
+      const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+      let imported = 0;
+      for (let i = 1; i < lines.length; i++) {
+        const values = lines[i].split(',').map(v => v.replace(/"/g, '').trim());
+        if (values.length < 3) continue;
+        const form = {
+          id: uid(), formNo: values[0] || nextSeqNo(S.currentDept),
+          dept: S.currentDept, formType: 'imported', formTypeName: 'CSV 匯入',
+          title: values[1] || '', applicant: values[2] || S.user?.name,
+          createdBy: S.user?.uid || 'guest', createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(), status: 'draft', version: 1,
+          fields: headers.slice(3).map((h, fi) => ({ key: 'f' + fi, label: h, type: 'text', value: values[fi + 3] || '' })),
+          items: [], approvalFlow: [], approvalHistory: [], comments: [], attachments: [], fieldHistory: {}
+        };
+        S.forms.unshift(form);
+        imported++;
+      }
+      saveData(); renderContent();
+      toast(`已匯入 ${imported} 張表單`, 'success');
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+// ========== [FIX] DELEGATE (代理人) ==========
+function setDelegate() {
+  const delegateName = prompt('代理人姓名：');
+  if (!delegateName) return;
+  const startDate = prompt('代理開始日期 (YYYY-MM-DD)：');
+  const endDate = prompt('代理結束日期 (YYYY-MM-DD)：');
+  if (!startDate || !endDate) return;
+  lsSet('delegate', { name: delegateName, start: startDate, end: endDate, setBy: S.user?.name, setAt: new Date().toISOString() });
+  addAuditLog('代理人', `設定代理人：${delegateName}（${startDate} ~ ${endDate}）`);
+  toast('代理人已設定：' + delegateName, 'success');
+  renderContent();
+}
+
+function getActiveDelegate() {
+  const d = lsGet('delegate');
+  if (!d) return null;
+  const now = new Date().toISOString().split('T')[0];
+  if (now >= d.start && now <= d.end) return d;
+  return null;
+}
+
+// ========== [FIX] PRODUCTION REPORT PAGE ==========
+function pageProductionReport() {
+  const total = S.workOrders.length;
+  const completed = S.workOrders.filter(w => w.status === '完工' || w.status === '結案');
+  const overdue = S.workOrders.filter(w => w.dueDate && new Date(w.dueDate) < new Date() && w.status !== '完工' && w.status !== '結案');
+  const totalPlanned = S.workOrders.reduce((s, w) => s + (w.planQty || 0), 0);
+  const totalCompleted = S.workOrders.reduce((s, w) => s + (w.completedQty || 0), 0);
+  const totalDefect = S.workOrders.reduce((s, w) => s + (w.defectQty || 0), 0);
+  const achieveRate = totalPlanned > 0 ? Math.round(totalCompleted / totalPlanned * 100) : 0;
+
+  return `<div class="fade-in">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+      <h2 style="font-size:1.3rem;font-weight:700;">生產報表</h2>
+      <button class="btn btn-sm btn-secondary" onclick="exportProductionCsv()">${icon('download')} CSV 匯出</button>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-content"><div class="stat-value">${total}</div><div class="stat-label">工單總數</div></div></div>
+      <div class="stat-card"><div class="stat-content"><div class="stat-value">${completed.length}</div><div class="stat-label">已完工</div></div></div>
+      <div class="stat-card"><div class="stat-content"><div class="stat-value" style="color:${achieveRate>=80?'var(--success)':'var(--warning)'};">${achieveRate}%</div><div class="stat-label">整體達成率</div></div></div>
+      <div class="stat-card"><div class="stat-content"><div class="stat-value" style="color:var(--danger);">${overdue.length}</div><div class="stat-label">逾期工單</div></div></div>
+    </div>
+    <div class="card">
+      <div class="card-title" style="margin-bottom:12px;">生產概況</div>
+      <div style="font-size:0.85rem;line-height:2;">
+        <div>計畫總量：${fmtMoney(totalPlanned)}</div>
+        <div>完成總量：${fmtMoney(totalCompleted)}</div>
+        <div>不良總量：${fmtMoney(totalDefect)} (不良率 ${totalCompleted > 0 ? (totalDefect/totalCompleted*100).toFixed(1) : 0}%)</div>
+      </div>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden;">
+      <table class="data-table"><thead><tr><th>工單號</th><th>產品</th><th>計畫</th><th>完成</th><th>不良</th><th>達成率</th><th>狀態</th></tr></thead>
+      <tbody>${S.workOrders.map(w => {
+        const pct = w.planQty > 0 ? Math.round((w.completedQty||0)/w.planQty*100) : 0;
+        return `<tr><td style="font-family:var(--font-mono);font-size:0.78rem;">${esc(w.woNo)}</td><td>${esc(w.product)}</td><td>${w.planQty}</td><td>${w.completedQty||0}</td><td>${w.defectQty||0}</td><td>${pct}%</td><td>${statusBadgeGeneric(w.status)}</td></tr>`;
+      }).join('')}</tbody></table>
+    </div>
+  </div>`;
+}
+
+function exportProductionCsv() {
+  const headers = ['工單號','產品','料號','計畫量','完成量','不良量','達成率','狀態'];
+  const rows = S.workOrders.map(w => [w.woNo, w.product, w.partNo, w.planQty, w.completedQty||0, w.defectQty||0, (w.planQty>0?Math.round((w.completedQty||0)/w.planQty*100):0)+'%', w.status]);
+  const csv = '\ufeff' + [headers,...rows].map(r => r.map(c => '"'+String(c||'').replace(/"/g,'""')+'"').join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'production_report.csv'; a.click();
+  toast('生產報表已匯出', 'success');
+}
+
+// ========== [FIX] KNOWLEDGE BASE EXTRA BLOCKS ==========
+function addKBBlockWithType(pageId, type) {
+  const p = S.kbPages.find(x => x.id === pageId);
+  if (!p) return;
+  if (type === 'table') {
+    p.blocks.push({ type: 'table', content: '欄1|欄2|欄3\n值1|值2|值3\n值4|值5|值6' });
+  } else if (type === 'image') {
+    const url = prompt('圖片 URL：');
+    if (!url) return;
+    p.blocks.push({ type: 'image', content: url });
+  } else if (type === 'details') {
+    p.blocks.push({ type: 'details', content: '點擊展開內容', summary: '折疊標題' });
+  } else if (type === 'list') {
+    p.blocks.push({ type: 'list', content: '項目一\n項目二\n項目三' });
+  } else if (type === 'ol') {
+    p.blocks.push({ type: 'ol', content: '第一項\n第二項\n第三項' });
+  } else {
+    p.blocks.push({ type: type || 'p', content: '' });
+  }
+  p.updatedAt = new Date().toISOString();
+  saveData(); renderContent();
 }
 
 // ========== KEYBOARD SHORTCUTS ==========
